@@ -118,3 +118,77 @@ messages, and reports EOF, truncated EOF, socket errors, and oversized lines
 separately. Its buffer capacity includes the trailing NUL; embedded NULs are
 counted, so consumers must validate the returned length. Close the connection
 after an error, truncated line, or oversized line. See `include/net_io.h`.
+
+## Team Members & Task Assignments
+
+These assignments cover the complete application, including planned work beyond
+the current server core. Graded tasks and additional responsibilities are listed
+separately for each member.
+
+| Member | Full Name | Student ID | Role | Total Points |
+| --- | --- | --- | --- | --- |
+| Member 1 | Cao Trường Xuân | 20236016 | Server Development & Shared Networking | 10 |
+| Member 2 | Nguyễn Đức Thắng | 20235998 | Client Development & P2P File Transfer | 10 |
+| **Total** | | | | **20** |
+
+### Member 1 — Cao Trường Xuân
+
+**Role:** Server Development & Shared Networking
+
+**Graded tasks**
+
+| No. | Assigned Task | Points |
+| --- | --- | --- |
+| 1 | Line-oriented data processing | 1 |
+| 2 | Server socket I/O implementation | 2 |
+| 3 | User registration and account management | 2 |
+| 4 | User login and session management | 2 |
+| 5 | Client activity information storage | 1 |
+| 6 | Server-side file searching | 1 |
+| 7 | Service logging | 1 |
+| | **Total** | **10** |
+
+**Additional responsibilities**
+
+- Initialize the project skeleton and Makefile.
+- Define the shared TCP communication protocol.
+- Implement the multithreaded server.
+- Maintain the centralized file index.
+- Handle shared-file registration and removal requests on the server.
+- Implement server-side tests and maintain server modules.
+
+### Member 2 — Nguyễn Đức Thắng
+
+**Role:** Client Development & P2P File Transfer
+
+**Graded tasks**
+
+| No. | Assigned Task | Points |
+| --- | --- | --- |
+| 1 | Client socket I/O implementation | 2 |
+| 2 | Sending client ID and P2P listening port | 1 |
+| 3 | Registering shared filenames | 2 |
+| 4 | Unregistering shared filenames | 2 |
+| 5 | Peer-to-peer file downloading | 3 |
+| | **Total** | **10** |
+
+**Additional responsibilities**
+
+- Implement the client interface and server communication.
+- Generate and persist client IDs in `config.txt`.
+- Maintain the local shared-file index in `index.txt`.
+- Implement client-side account registration, login, and file-search requests.
+- Implement direct P2P upload and download.
+- Report failed download attempts to the server.
+- Implement client-side tests and maintain client modules.
+
+### Shared Responsibilities
+
+Both members are responsible for:
+
+- Following the agreed TCP communication protocol.
+- Maintaining C11 compatibility with Ubuntu 20.04.
+- Testing their assigned components.
+- Reviewing GitHub pull requests.
+- Integrating and testing the complete application.
+- Debugging cross-component issues.
