@@ -1,0 +1,8 @@
+/build/
+/server
+/data/server/*
+!/data/server/.gitkeep
+__pycache__/
+*.pyc
+*.core
+core
