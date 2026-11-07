@@ -4,7 +4,7 @@ CFLAGS = -O2 -g -std=c11 -Wall -Wextra -Wpedantic -pthread
 LDFLAGS = -pthread
 LDLIBS = -lcrypto
 
-SERVER_SOURCES = src/server/server.c src/common/net_io.c
+SERVER_SOURCES = src/server/server.c src/server/auth.c src/server/session.c src/common/net_io.c
 SERVER_OBJECTS = $(SERVER_SOURCES:src/%.c=build/%.o)
 NET_TEST = build/tests/test_net_io
 
@@ -25,6 +25,7 @@ $(NET_TEST): tests/server/test_net_io.c build/common/net_io.o include/net_io.h
 test: server $(NET_TEST)
 	./$(NET_TEST)
 	./server --help
+	python3 -m unittest discover -s tests/server -p 'test_server.py' -v
 
 clean:
 	rm -rf build server
