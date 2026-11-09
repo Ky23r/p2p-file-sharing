@@ -4,6 +4,7 @@ import concurrent.futures
 import hashlib
 import os
 from pathlib import Path
+import pty
 import random
 import resource
 import select
@@ -13,12 +14,14 @@ import stat
 import struct
 import subprocess
 import tempfile
+import termios
 import threading
 import time
 import unittest
 
 
 BINARY = Path(__file__).resolve().parents[2] / "server"
+CLIENT_BINARY = BINARY.with_name("client")
 PASSWORD = "LocalTest!42"
 
 
@@ -526,6 +529,128 @@ class ServerTests(unittest.TestCase):
         finally:
             for client in clients:
                 client.close()
+
+
+class ClientCoreTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="p2p-client-test-")
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name)
+        self.config = self.directory / "config.txt"
+        self.server = Server(self.directory)
+        self.addCleanup(self.server.stop)
+        self.peer_port = available_port()
+
+    def client_args(self, port=None, peer_port=None):
+        port = self.server.port if port is None else port
+        peer_port = self.peer_port if peer_port is None else peer_port
+        return [str(CLIENT_BINARY), "--port", str(port), "--peer-port", str(peer_port)]
+
+    def run_client(self, commands, *, port=None, peer_port=None):
+        return subprocess.run(self.client_args(port, peer_port), cwd=self.directory,
+                              input=commands, text=True, capture_output=True, timeout=20)
+
+    def test_account_commands_and_reuse_of_saved_id(self):
+        first = self.run_client(f"register alice\n{PASSWORD}\nlogin alice\nWrongPass!\n"
+                                f"hello\nlogin alice\n{PASSWORD}\nlogout\nquit\n")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(first.stdout.splitlines(), ["OK REGISTERED", "ERR INVALID_CREDENTIALS",
+                                                      "ERR AUTH_REQUIRED", "OK LOGGED_IN",
+                                                      "OK HELLO", "OK LOGGED_OUT"])
+        saved = self.config.read_text()
+        self.assertRegex(saved, r"^[0-9]{1,10}\n\Z")
+
+        with self.server.connect() as peer:
+            self.assertEqual(peer.command(f"LOGIN alice {PASSWORD}"), b"OK LOGGED_IN")
+            self.assertEqual(peer.command(f"HELLO {saved.strip()} 12345"), b"OK HELLO")
+            second = self.run_client(f"login alice\n{PASSWORD}\nlogout\nquit\n")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(second.stdout.splitlines(), ["OK LOGGED_IN", "ERR CLIENT_ID_IN_USE",
+                                                       "OK LOGGED_OUT"])
+        self.assertEqual(self.config.read_text(), saved)
+
+    def test_script_does_not_treat_password_as_a_command_after_invalid_username(self):
+        client = self.run_client(f"register ab\nquit\nregister alice\n{PASSWORD}\nquit\n")
+        self.assertEqual(client.returncode, 0, client.stderr)
+        self.assertEqual(client.stdout, "OK REGISTERED\n")
+        self.assertIn("Username must be", client.stderr)
+
+    def test_hello_announces_a_reachable_listener_and_rejects_a_malformed_reply(self):
+        self.config.write_text("4294967295\n")
+        with socket.socket() as listener, concurrent.futures.ThreadPoolExecutor(1) as pool:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            listener.settimeout(5)
+            peer_port = available_port()
+            pending = pool.submit(self.run_client, f"login alice\n{PASSWORD}\nquit\n",
+                                  port=listener.getsockname()[1], peer_port=peer_port)
+            connection, _ = listener.accept()
+            with connection, connection.makefile("rb") as requests:
+                connection.settimeout(5)
+                self.assertEqual(requests.readline(), f"LOGIN alice {PASSWORD}\n".encode())
+                connection.sendall(b"OK LOGGED_IN\n")
+                self.assertEqual(requests.readline(), f"HELLO 4294967295 {peer_port}\n".encode())
+                with socket.create_connection(("127.0.0.1", peer_port), timeout=5):
+                    pass
+                connection.sendall(b"OK HELLO\x00ignored\n")
+            client = pending.result()
+        self.assertNotEqual(client.returncode, 0)
+        self.assertEqual(client.stdout.splitlines(), ["OK LOGGED_IN"])
+        self.assertIn("Invalid response", client.stderr)
+
+    def test_client_fails_to_start_when_peer_port_is_in_use(self):
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen(1)
+            client = self.run_client("quit\n", peer_port=occupied.getsockname()[1])
+        self.assertNotEqual(client.returncode, 0)
+        self.assertIn("Starting peer listener", client.stderr)
+        self.assertEqual(client.stdout, "")
+
+    def test_terminal_rejects_binary_password_and_restores_echo_on_interrupt(self):
+        terminal, child_tty = pty.openpty()
+        self.addCleanup(os.close, terminal)
+        self.addCleanup(os.close, child_tty)
+
+        def read_until(marker):
+            deadline = time.monotonic() + 5
+            output = bytearray()
+            while marker not in output:
+                readable, _, _ = select.select([terminal], [], [], max(0, deadline - time.monotonic()))
+                self.assertTrue(readable, f"Missing terminal output {marker!r}: {output!r}")
+                output.extend(os.read(terminal, 4096))
+            return output
+
+        with subprocess.Popen(self.client_args(), cwd=self.directory,
+                              stdin=child_tty, stdout=child_tty,
+                              stderr=child_tty) as client:
+            try:
+                read_until(b"p2p> ")
+                os.write(terminal, b"register alice\n")
+                read_until(b"Password: ")
+                self.assertFalse(termios.tcgetattr(child_tty)[3] & termios.ECHO)
+                os.write(terminal, PASSWORD.encode() + b"\x00junk\n\n")
+                self.assertNotIn(PASSWORD.encode(), read_until(b"Password must be"))
+                self.assertTrue(termios.tcgetattr(child_tty)[3] & termios.ECHO)
+                with self.server.connect() as peer:
+                    self.assertEqual(peer.command(f"LOGIN alice {PASSWORD}"), b"ERR INVALID_CREDENTIALS")
+
+                os.write(terminal, b"login alice\n")
+                read_until(b"Password: ")
+                client.send_signal(signal.SIGINT)
+                self.assertEqual(client.wait(timeout=5), 128 + signal.SIGINT)
+                self.assertTrue(termios.tcgetattr(child_tty)[3] & termios.ECHO)
+            finally:
+                if client.poll() is None:
+                    client.kill()
+
+    def test_invalid_config_is_preserved(self):
+        invalid = b"4294967296\n"
+        self.config.write_bytes(invalid)
+        client = self.run_client("quit\n")
+        self.assertNotEqual(client.returncode, 0)
+        self.assertIn("config.txt", client.stderr)
+        self.assertEqual(self.config.read_bytes(), invalid)
 
 
 if __name__ == "__main__":
