@@ -1,9 +1,11 @@
 # p2p-file-sharing
 
 C11 project targeting Ubuntu 20.04, GCC, POSIX TCP sockets, and pthreads.
-The centralized control server provides registration, authentication, and
-connection-local sessions. The terminal client sends account commands and
-announces its persistent peer identity to the server.
+The centralized control server provides accounts, connection-local sessions,
+peer announcements, shared-file registration/removal, exact filename searching,
+failed-download reports, and service logging. The terminal client currently
+sends account commands and announces its persistent peer identity; client file
+commands and direct P2P transfer remain to be implemented by Member 2.
 
 Install `build-essential libssl-dev python3`, then run:
 
@@ -14,6 +16,8 @@ make test
 ./server
 # Or choose an IPv4 address, port, and account file:
 ./server --bind 127.0.0.1 --port 9100 --accounts /private/directory/accounts.db
+# Optionally choose a service log (default: <accounts-path>.log):
+./server --accounts /private/directory/accounts.db --log /private/directory/service.log
 make clean
 ```
 
@@ -65,10 +69,15 @@ files. File serving and direct downloads belong to the P2P transfer milestone.
 
 ## Control protocol
 
+The full implemented contract, examples, and client integration requirements are
+in [docs/PROTOCOL.md](docs/PROTOCOL.md). File commands below are server protocol
+operations; the terminal CLI currently exposes only the account/HELLO commands.
+
 Each ASCII request ends with LF, with at most 4096 bytes **excluding LF**.
 Commands are case-sensitive. Arguments use exactly one ASCII space. Leading or
 trailing spaces, CR (including CRLF), tabs, NULs, and other control bytes are
 invalid. Responses end with LF: `OK <MESSAGE>` or `ERR <ERROR_CODE>`.
+`SEARCH` success includes the specified number of `FILE` result lines.
 
 | Request | Success | Authentication |
 | --- | --- | --- |
@@ -76,6 +85,10 @@ invalid. Responses end with LF: `OK <MESSAGE>` or `ERR <ERROR_CODE>`.
 | `LOGIN <username> <password>` | `OK LOGGED_IN` | Logged out; logs in this connection |
 | `HELLO <client_id> <port>` | `OK HELLO` | Login required |
 | `LOGOUT` | `OK LOGGED_OUT` | Login required; clears session, keeps TCP open |
+| `SHARE <filename> <size>` | `OK SHARED` | Login and HELLO required |
+| `UNSHARE <filename>` | `OK UNSHARED` | Login and HELLO required |
+| `SEARCH <filename>` | `OK RESULTS <count>`, then count `FILE` lines | Login and HELLO required |
+| `REPORT <client_id> <filename> <reason>` | `OK REPORTED` | Login and HELLO required |
 
 Usernames are case-sensitive, 3–32 ASCII letters, digits, or underscores.
 Passwords are 8–128 ASCII bytes from `!` through `~` (no spaces).
@@ -84,27 +97,48 @@ decimal integers from 1 through 65535. Signs are invalid; leading zeros are
 allowed. HELLO records the IP observed on the connection. A client may update
 its own registration; another active session with the same ID is rejected.
 
+Filenames are case-sensitive printable ASCII basenames of 1–255 decoded bytes,
+excluding slash, backslash, `.` and `..`. Letters, digits, `-._~` stay literal;
+other allowed bytes use uppercase `%HH` escapes, such as `my%20notes.txt`.
+Noncanonical encodings are rejected. File sizes are unsigned 64-bit decimal byte
+counts. A connection can share 128 distinct names; registering an existing name
+updates its size. Removal only affects the requesting connection's shares.
+
+Search matches an exact filename and returns a consistent snapshot, sorted by
+numeric client ID, including the requester when applicable. Each result is
+`FILE <filename> <size> <client_id> <IPv4> <port>`. Zero matches returns
+`OK RESULTS 0` with no further lines. Reports accept `CONNECT_FAILED`, `NOT_FOUND`,
+`TIMEOUT`, `TRANSFER_FAILED`, or `SIZE_MISMATCH`. They require another peer's
+existing advertisement and are logged without removing it.
+
 | Error | Meaning |
 | --- | --- |
 | `INVALID_REQUEST` | Invalid bytes, spacing, argument count, or argument values |
 | `UNKNOWN_COMMAND` | Unrecognized command in an otherwise valid request |
-| `AUTH_REQUIRED` | HELLO or LOGOUT before login |
+| `AUTH_REQUIRED` | Operation requires login |
+| `HELLO_REQUIRED` | File operation requires a successful peer announcement |
 | `ALREADY_AUTHENTICATED` | LOGIN or REGISTER while logged in |
 | `USER_EXISTS` | Username already registered |
 | `INVALID_CREDENTIALS` | Unknown username or wrong password (same response) |
 | `CLIENT_ID_IN_USE` | Another active connection holds the ID |
+| `FILE_NOT_FOUND` | Relevant peer/connection does not advertise that filename |
+| `SHARE_LIMIT` | Already advertising 128 distinct filenames |
 | `LINE_TOO_LONG` | Request exceeds 4096 bytes; connection closes |
 | `SERVER_BUSY` | Connection/thread capacity unavailable; connection closes |
-| `INTERNAL_ERROR` | Credential hashing or persistent-storage failure |
+| `INTERNAL_ERROR` | Credential hashing, persistent-storage, or allocation failure |
 
-Syntax validation precedes authorization checks. Requests have at most two
-arguments, even for unknown commands. Malformed lines can be followed by more
+Syntax validation precedes authorization checks. `REPORT` takes three arguments;
+other commands take at most two. Unknown commands with more than two arguments
+are invalid. Malformed lines can be followed by more
 commands. Oversized lines return `LINE_TOO_LONG` and close the connection; EOF discards incomplete
 requests. Disconnects clear all session state. Accounts survive restarts.
 LOGIN does not automatically register a peer. One account may log in on multiple
 connections; authentication and HELLO state remain independent. A rejected
 HELLO leaves the connection's previous registration intact. LOGOUT and disconnect
-release the ID; IDs and peer details are never persisted.
+release the ID and remove all shares. Successfully changing a client ID clears
+its shares; updating the port under the same ID preserves them. IDs, peer details,
+and file advertisements are never persisted. After a new login, announce the
+peer and register local shares again.
 
 Plaintext TCP authentication is acceptable only for controlled local testing.
 External deployment requires encrypted transport. This core has no login rate
@@ -126,17 +160,28 @@ rewriting their contents. Back up the account file; repair corruption offline.
 There is no automatic recovery from a crash during an append.
 
 `src/server/server.c` owns IPv4 sockets, strict parsing, workers, and the shutdown
-self-pipe. `src/server/session.c` owns the mutex-protected session registry and
-client ID uniqueness. Completed workers are regularly joined and freed; shutdown
+self-pipe. `src/server/session.c` owns the mutex-protected session registry, client
+ID uniqueness, and per-connection file index. Searches copy a snapshot before
+releasing the mutex; socket and log I/O never hold that lock.
+`src/common/protocol.c` provides shared filename encoding/decoding and decimal
+parsing. `src/server/service_log.c` appends UTC timestamped events to a mode-0600
+regular file owned by the server user. A log path must be separate from account
+storage and have a trusted existing parent directory. Unusable logs fail startup;
+runtime writes are best effort. Passwords and raw malformed input are never
+logged. Rotate logs outside the process.
+Completed workers are regularly joined and freed; shutdown
 also waits for credential operations already in progress. Auth and session locks
 are never held together; expensive KDF work runs outside both locks.
 
-`make test` runs the C socket tests and Python standard-library TCP integration
+`make test` runs the C socket/protocol tests and Python standard-library TCP integration
 tests using temporary data and available local ports. Client tests cover account
 commands, reachable peer announcements, port conflicts, ID persistence, terminal
 input, and invalid server replies. Server tests cover concurrent accounts and sessions, persistence and hash
 verification, malformed input, storage failures, client limits, descriptor/thread
 cleanup, and graceful shutdown.
+File-protocol tests cover encoded filenames and integer limits, registration and
+owner-only removal, counted search results, concurrent index updates, lifecycle
+cleanup, advisory failure reports, and private logs without credentials.
 The permission-denial test drops privileges when run as root; it is skipped for
 an unprivileged test runner. AddressSanitizer/UndefinedBehaviorSanitizer builds can
 be run with the same suite:

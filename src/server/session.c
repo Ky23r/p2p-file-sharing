@@ -6,6 +6,40 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+struct shared_file {
+    char filename[PROTOCOL_FILENAME_TOKEN_MAX + 1];
+    uint64_t size;
+    shared_file *next;
+};
+
+/* All file-index helpers run with manager->mutex held. Keeping advertisements
+ * on their owning session makes identity changes and cleanup atomic with search.
+ */
+static void clear_files(session *client)
+{
+    while (client->files != NULL) {
+        shared_file *file = client->files;
+        client->files = file->next;
+        free(file);
+    }
+    client->file_count = 0;
+}
+
+static shared_file *find_file(const session *client, const char *filename)
+{
+    for (shared_file *file = client->files; file != NULL; file = file->next)
+        if (strcmp(file->filename, filename) == 0)
+            return file;
+    return NULL;
+}
+
+static enum session_result require_peer(const session *client)
+{
+    if (!client->authenticated)
+        return SESSION_UNAUTHORIZED;
+    return client->peer_registered ? SESSION_OK : SESSION_HELLO_REQUIRED;
+}
+
 int session_manager_init(session_manager *manager)
 {
     memset(manager, 0, sizeof(*manager));
@@ -59,6 +93,7 @@ void session_remove(session_manager *manager, session *client)
     *link = client->next;
     /* Close while locked so shutdown cannot act on a recycled descriptor. */
     close(client->fd);
+    clear_files(client);
     memset(client, 0, sizeof(*client));
     free(client);
     manager->count--;
@@ -85,6 +120,7 @@ void session_finish(session_manager *manager, session *client)
     pthread_mutex_lock(&manager->mutex);
     close(client->fd);
     client->fd = -1;
+    clear_files(client);
     memset(client->username, 0, sizeof(client->username));
     client->authenticated = false;
     client->peer_registered = false;
@@ -135,6 +171,7 @@ bool session_logout(session_manager *manager, session *client)
 {
     pthread_mutex_lock(&manager->mutex);
     bool was_authenticated = client->authenticated;
+    clear_files(client);
     memset(client->username, 0, sizeof(client->username));
     client->authenticated = false;
     client->peer_registered = false;
@@ -159,9 +196,130 @@ enum session_result session_hello(session_manager *manager, session *client,
             }
         }
         if (result == SESSION_OK) {
+            if (client->peer_registered && client->client_id != id)
+                clear_files(client);
             client->client_id = id;
             client->port = port;
             client->peer_registered = true;
+        }
+    }
+    pthread_mutex_unlock(&manager->mutex);
+    return result;
+}
+
+enum session_result session_share(session_manager *manager, session *client,
+                                  const char *filename, uint64_t size)
+{
+    pthread_mutex_lock(&manager->mutex);
+    enum session_result result = require_peer(client);
+    if (result == SESSION_OK) {
+        shared_file *file = find_file(client, filename);
+        if (file != NULL) {
+            file->size = size;
+        } else if (client->file_count >= PROTOCOL_SHARE_LIMIT) {
+            result = SESSION_SHARE_LIMIT;
+        } else {
+            file = malloc(sizeof(*file));
+            if (file == NULL) {
+                result = SESSION_ERROR;
+            } else {
+                strcpy(file->filename, filename);
+                file->size = size;
+                file->next = client->files;
+                client->files = file;
+                client->file_count++;
+            }
+        }
+    }
+    pthread_mutex_unlock(&manager->mutex);
+    return result;
+}
+
+enum session_result session_unshare(session_manager *manager, session *client,
+                                    const char *filename)
+{
+    pthread_mutex_lock(&manager->mutex);
+    enum session_result result = require_peer(client);
+    if (result == SESSION_OK) {
+        shared_file **link = &client->files;
+        while (*link != NULL && strcmp((*link)->filename, filename) != 0)
+            link = &(*link)->next;
+        if (*link == NULL) {
+            result = SESSION_FILE_NOT_FOUND;
+        } else {
+            shared_file *file = *link;
+            *link = file->next;
+            free(file);
+            client->file_count--;
+        }
+    }
+    pthread_mutex_unlock(&manager->mutex);
+    return result;
+}
+
+static int compare_matches(const void *left, const void *right)
+{
+    const file_match *a = left, *b = right;
+    return (a->client_id > b->client_id) - (a->client_id < b->client_id);
+}
+
+enum session_result session_search(session_manager *manager, session *client,
+                                   const char *filename, file_match **matches, size_t *count)
+{
+    *matches = NULL;
+    *count = 0;
+    pthread_mutex_lock(&manager->mutex);
+    enum session_result result = require_peer(client);
+    if (result == SESSION_OK) {
+        size_t found = 0;
+        for (session *peer = manager->head; peer != NULL; peer = peer->next)
+            if (peer->peer_registered && find_file(peer, filename) != NULL)
+                found++;
+        file_match *snapshot = found == 0 ? NULL : calloc(found, sizeof(*snapshot));
+        if (found != 0 && snapshot == NULL) {
+            result = SESSION_ERROR;
+        } else {
+            size_t i = 0;
+            for (session *peer = manager->head; peer != NULL; peer = peer->next) {
+                if (!peer->peer_registered)
+                    continue;
+                shared_file *file = find_file(peer, filename);
+                if (file == NULL)
+                    continue;
+                strcpy(snapshot[i].filename, file->filename);
+                snapshot[i].size = file->size;
+                snapshot[i].client_id = peer->client_id;
+                strcpy(snapshot[i].ip, peer->ip);
+                snapshot[i].port = peer->port;
+                i++;
+            }
+            *matches = snapshot;
+            *count = found;
+        }
+    }
+    pthread_mutex_unlock(&manager->mutex);
+    if (*count > 1)
+        qsort(*matches, *count, sizeof(**matches), compare_matches);
+    return result;
+}
+
+enum session_result session_report(session_manager *manager, session *client,
+                                   uint32_t target_id, const char *filename)
+{
+    pthread_mutex_lock(&manager->mutex);
+    enum session_result result = require_peer(client);
+    if (result == SESSION_OK) {
+        result = SESSION_FILE_NOT_FOUND;
+        if (target_id == client->client_id) {
+            result = SESSION_INVALID_REPORT;
+        } else {
+            for (session *peer = manager->head; peer != NULL; peer = peer->next) {
+                if (peer->peer_registered && peer->client_id == target_id &&
+                    find_file(peer, filename) != NULL) {
+                    result = SESSION_OK;
+                    break;
+                }
+            }
         }
     }
     pthread_mutex_unlock(&manager->mutex);
