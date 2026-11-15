@@ -2,8 +2,8 @@
 
 C11 project targeting Ubuntu 20.04, GCC, POSIX TCP sockets, and pthreads.
 The centralized control server provides registration, authentication, and
-connection-local sessions. File search, indexing, sharing, and transfers are
-outside this scope.
+connection-local sessions. The terminal client sends account commands and
+announces its persistent peer identity to the server.
 
 Install `build-essential libssl-dev python3`, then run:
 
@@ -28,6 +28,40 @@ releases storage. The server allows 128 simultaneous connections and applies
 30-second receive/send inactivity timeouts. A timed-out socket closes without a
 protocol response; sending bytes slowly can extend a request's total lifetime.
 Startup prints the bound endpoint and `READY` once signal handling is installed.
+
+## Client core
+
+After starting the server, run `./client` in a second terminal. The default
+settings can also be supplied explicitly.
+
+```sh
+./client --server 127.0.0.1 --port 9000 --peer-port 9001 --config config.txt
+```
+
+| Command | Action |
+| --- | --- |
+| `register alice` | Prompt for a password and create an account |
+| `login alice` | Prompt for a password, log in, and send `HELLO` |
+| `hello` | Send the client ID and peer port again on the current connection |
+| `logout` | End the session and release the client ID |
+| `help` | Show commands |
+| `quit` | Close the connection and exit |
+
+The terminal hides password input. With redirected stdin, put the password on
+the line after `register USER` or `login USER`. The client displays the server's
+`OK` and `ERR` responses. A connection error ends the CLI, so start a new client
+session to reconnect.
+
+`config.txt` holds an unsigned 32-bit client ID as one line of up to ten decimal
+digits. The client generates the ID when the file is missing and reuses it on
+later runs. Use a separate `--config` path in a trusted directory for each peer.
+If the server returns `CLIENT_ID_IN_USE`, the login still succeeds and `hello`
+can retry the announcement.
+
+The client opens an IPv4 TCP listener on `--peer-port` (default `9001`) before
+connecting to the control server. `HELLO` announces that port after login.
+For multiple clients on the same machine, choose distinct peer ports and config
+files. File serving and direct downloads belong to the P2P transfer milestone.
 
 ## Control protocol
 
@@ -98,9 +132,11 @@ also waits for credential operations already in progress. Auth and session locks
 are never held together; expensive KDF work runs outside both locks.
 
 `make test` runs the C socket tests and Python standard-library TCP integration
-tests. Each server test uses temporary data and available local ports. Tests cover
-concurrent accounts/sessions, persistence and hash verification, malformed input,
-storage failures, client limits, descriptor/thread cleanup, and graceful shutdown.
+tests using temporary data and available local ports. Client tests cover account
+commands, reachable peer announcements, port conflicts, ID persistence, terminal
+input, and invalid server replies. Server tests cover concurrent accounts and sessions, persistence and hash
+verification, malformed input, storage failures, client limits, descriptor/thread
+cleanup, and graceful shutdown.
 The permission-denial test drops privileges when run as root; it is skipped for
 an unprivileged test runner. AddressSanitizer/UndefinedBehaviorSanitizer builds can
 be run with the same suite:

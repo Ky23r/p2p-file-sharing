@@ -1,5 +1,8 @@
 /build/
 /server
+/client
+/config.txt
+/config.txt.tmp.*
 /data/server/*
 !/data/server/.gitkeep
 __pycache__/
