@@ -11,16 +11,16 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-struct shared_index {
+struct SharedIndex {
     pthread_mutex_t mutex;
     char *path;
     int lock_fd;
     size_t count;
     bool online;
-    shared_file entries[FILE_ENTRY_LIMIT];
+    SharedFile entries[FILE_ENTRY_LIMIT];
 };
 
-static size_t find_entry(shared_index *index, const char *name)
+static size_t find_entry(SharedIndex *index, const char *name)
 {
     size_t i = 0;
     while (i < index->count && strcmp(index->entries[i].name, name) != 0)
@@ -45,7 +45,7 @@ int shared_file_open(const char *path, uint64_t *size)
 }
 
 /* index mutex held; skip selects the entry removed by this transaction. */
-static int save_index(shared_index *index, size_t skip)
+static int save_index(SharedIndex *index, size_t skip)
 {
     size_t capacity = strlen(index->path) + sizeof(".tmp.XXXXXX");
     char *temporary = malloc(capacity);
@@ -96,7 +96,7 @@ static bool valid_path(const char *path)
     return true;
 }
 
-static int read_index(shared_index *index)
+static int read_index(SharedIndex *index)
 {
     int fd = open(index->path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0)
@@ -123,7 +123,7 @@ static int read_index(shared_index *index)
         }
         line[length - 1] = '\0';
         *separator++ = '\0';
-        shared_file *entry = &index->entries[index->count];
+        SharedFile *entry = &index->entries[index->count];
         if (!file_name_decode(line, entry->name) ||
             !file_hex_decode(separator, entry->path, sizeof(entry->path)) || !valid_path(entry->path) ||
             strcmp(strrchr(entry->path, '/') + 1, entry->name) != 0 || find_entry(index, entry->name) != index->count) {
@@ -144,9 +144,9 @@ static int read_index(shared_index *index)
     return result;
 }
 
-shared_index *shared_index_load(const char *path)
+SharedIndex *shared_index_load(const char *path)
 {
-    shared_index *index = calloc(1, sizeof(*index));
+    SharedIndex *index = calloc(1, sizeof(*index));
     if (index == NULL)
         return NULL;
     int error = pthread_mutex_init(&index->mutex, NULL);
@@ -182,7 +182,7 @@ fail:
     return NULL;
 }
 
-void shared_index_destroy(shared_index *index)
+void shared_index_destroy(SharedIndex *index)
 {
     if (index == NULL)
         return;
@@ -193,7 +193,7 @@ void shared_index_destroy(shared_index *index)
     free(index);
 }
 
-int shared_index_add(shared_index *index, const char *path, char name[FILE_NAME_CAP])
+int shared_index_add(SharedIndex *index, const char *path, char name[FILE_NAME_CAP])
 {
     char canonical[FILE_PATH_CAP];
     if (realpath(path, canonical) == NULL)
@@ -221,7 +221,7 @@ int shared_index_add(shared_index *index, const char *path, char name[FILE_NAME_
         errno = ENOSPC;
         result = -1;
     } else {
-        shared_file *entry = &index->entries[index->count++];
+        SharedFile *entry = &index->entries[index->count++];
         strcpy(entry->name, name);
         strcpy(entry->path, canonical);
         entry->size = size;
@@ -235,7 +235,7 @@ int shared_index_add(shared_index *index, const char *path, char name[FILE_NAME_
     return result;
 }
 
-int shared_index_remove(shared_index *index, const char *name)
+int shared_index_remove(SharedIndex *index, const char *name)
 {
     pthread_mutex_lock(&index->mutex);
     size_t position = find_entry(index, name);
@@ -245,7 +245,7 @@ int shared_index_remove(shared_index *index, const char *name)
         result = save_index(index, position);
         if (result == 0) {
             memmove(index->entries + position, index->entries + position + 1,
-                    (index->count - position - 1) * sizeof(shared_file));
+                    (index->count - position - 1) * sizeof(SharedFile));
             index->count--;
         }
     }
@@ -253,7 +253,7 @@ int shared_index_remove(shared_index *index, const char *name)
     return result;
 }
 
-bool shared_index_get(shared_index *index, size_t position, shared_file *entry)
+bool shared_index_get(SharedIndex *index, size_t position, SharedFile *entry)
 {
     pthread_mutex_lock(&index->mutex);
     bool found = position < index->count;
@@ -263,7 +263,7 @@ bool shared_index_get(shared_index *index, size_t position, shared_file *entry)
     return found;
 }
 
-void shared_index_set_online(shared_index *index, bool online)
+void shared_index_set_online(SharedIndex *index, bool online)
 {
     pthread_mutex_lock(&index->mutex);
     index->online = online;
@@ -273,7 +273,7 @@ void shared_index_set_online(shared_index *index, bool online)
     pthread_mutex_unlock(&index->mutex);
 }
 
-void shared_index_mark(shared_index *index, const char *name, bool announced, uint64_t size)
+void shared_index_mark(SharedIndex *index, const char *name, bool announced, uint64_t size)
 {
     pthread_mutex_lock(&index->mutex);
     size_t position = find_entry(index, name);
@@ -284,7 +284,7 @@ void shared_index_mark(shared_index *index, const char *name, bool announced, ui
     pthread_mutex_unlock(&index->mutex);
 }
 
-int shared_index_open(shared_index *index, const char *name, uint64_t *size)
+int shared_index_open(SharedIndex *index, const char *name, uint64_t *size)
 {
     pthread_mutex_lock(&index->mutex);
     size_t position = find_entry(index, name);

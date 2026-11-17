@@ -18,7 +18,7 @@
 
 #define CLIENT_KEEPALIVE_SECONDS 10
 
-struct client_session {
+struct ClientSession {
     net_reader server;
     pthread_mutex_t mutex;
     pthread_cond_t wake;
@@ -29,24 +29,24 @@ struct client_session {
     bool announced;
     uint32_t id;
     uint16_t port;
-    shared_index *index;
+    SharedIndex *index;
     const char *downloads;
     ClientSignals *signals;
     size_t result_count;
-    file_result results[FILE_ENTRY_LIMIT];
+    FileSearchResult results[FILE_ENTRY_LIMIT];
 };
 
 enum reply_output { REPLY_BACKGROUND, REPLY_ALL, REPLY_ERRORS };
 
 /* Every function ending in _locked requires the control exchange mutex. */
-static void deactivate_locked(client_session *client)
+static void deactivate_locked(ClientSession *client)
 {
     client->announced = false;
     client->result_count = 0;
     shared_index_set_online(client->index, false);
 }
 
-static enum request_result fail_locked(client_session *client)
+static enum request_result fail_locked(ClientSession *client)
 {
     if (!client->failed) {
         char notification = 1;
@@ -63,7 +63,7 @@ static enum request_result fail_locked(client_session *client)
     return REQUEST_FAILED;
 }
 
-static int read_response_locked(client_session *client, char *line, size_t *length)
+static int read_response_locked(ClientSession *client, char *line, size_t *length)
 {
     int status = recv_line(&client->server, line, PROTOCOL_MAX_LINE + 1, length);
     if (status != NET_LINE_OK)
@@ -71,7 +71,7 @@ static int read_response_locked(client_session *client, char *line, size_t *leng
     return status;
 }
 
-static enum request_result error_response_locked(client_session *client, const char *line,
+static enum request_result error_response_locked(ClientSession *client, const char *line,
                                                   size_t length, enum reply_output output)
 {
     if (!file_error(line, length))
@@ -85,7 +85,7 @@ static enum request_result error_response_locked(client_session *client, const c
     return REQUEST_REJECTED;
 }
 
-static enum request_result exchange_locked(client_session *client, const char *request,
+static enum request_result exchange_locked(ClientSession *client, const char *request,
                                            const char *expected, enum reply_output output)
 {
     if (client->failed)
@@ -104,14 +104,14 @@ static enum request_result exchange_locked(client_session *client, const char *r
     return error_response_locked(client, response, length, output);
 }
 
-static enum request_result hello_locked(client_session *client, enum reply_output output)
+static enum request_result hello_locked(ClientSession *client, enum reply_output output)
 {
     char request[64];
     snprintf(request, sizeof(request), "HELLO %" PRIu32 " %u\n", client->id, (unsigned)client->port);
     return exchange_locked(client, request, "OK HELLO", output);
 }
 
-static enum request_result withdraw_locked(client_session *client, const shared_file *entry)
+static enum request_result withdraw_locked(ClientSession *client, const SharedFile *entry)
 {
     if (!entry->announced)
         return REQUEST_OK;
@@ -121,7 +121,7 @@ static enum request_result withdraw_locked(client_session *client, const shared_
     return exchange_locked(client, request, "OK UNSHARED", REPLY_ALL);
 }
 
-static enum request_result publish_locked(client_session *client, const shared_file *entry)
+static enum request_result publish_locked(ClientSession *client, const SharedFile *entry)
 {
     shared_index_mark(client->index, entry->name, false, entry->size);
     uint64_t size;
@@ -147,7 +147,7 @@ static enum request_result publish_locked(client_session *client, const shared_f
 
 static void *keepalive_loop(void *argument)
 {
-    client_session *client = argument;
+    ClientSession *client = argument;
     pthread_mutex_lock(&client->mutex);
     while (!client->stopping && !client->failed) {
         struct timespec deadline;
@@ -175,10 +175,10 @@ static void *keepalive_loop(void *argument)
     return NULL;
 }
 
-client_session *client_session_start(int fd, uint32_t id, uint16_t port,
-                                     shared_index *index, const char *downloads, ClientSignals *signals)
+ClientSession *client_session_start(int fd, uint32_t id, uint16_t port,
+                                     SharedIndex *index, const char *downloads, ClientSignals *signals)
 {
-    client_session *client = calloc(1, sizeof(*client));
+    ClientSession *client = calloc(1, sizeof(*client));
     if (client == NULL)
         return NULL;
     atomic_init(&client->stopping, false);
@@ -229,7 +229,7 @@ free_client:
     return NULL;
 }
 
-void client_session_stop(client_session *client)
+void client_session_stop(ClientSession *client)
 {
     if (client == NULL)
         return;
@@ -248,7 +248,7 @@ void client_session_stop(client_session *client)
     free(client);
 }
 
-bool client_session_failed(client_session *client)
+bool client_session_failed(ClientSession *client)
 {
     pthread_mutex_lock(&client->mutex);
     bool failed = client->failed;
@@ -256,12 +256,12 @@ bool client_session_failed(client_session *client)
     return failed;
 }
 
-int client_session_failure_fd(client_session *client)
+int client_session_failure_fd(ClientSession *client)
 {
     return client->failure[0];
 }
 
-enum request_result client_exchange(client_session *client, const char *request, const char *expected)
+enum request_result client_exchange(ClientSession *client, const char *request, const char *expected)
 {
     pthread_mutex_lock(&client->mutex);
     enum request_result result = exchange_locked(client, request, expected, REPLY_ALL);
@@ -269,7 +269,7 @@ enum request_result client_exchange(client_session *client, const char *request,
     return result;
 }
 
-enum request_result client_hello(client_session *client)
+enum request_result client_hello(ClientSession *client)
 {
     pthread_mutex_lock(&client->mutex);
     enum request_result result = hello_locked(client, REPLY_ERRORS);
@@ -277,7 +277,7 @@ enum request_result client_hello(client_session *client)
         client->announced = true;
         shared_index_set_online(client->index, true);
         puts("OK HELLO");
-        shared_file entry;
+        SharedFile entry;
         for (size_t i = 0; shared_index_get(client->index, i, &entry); ++i)
             if (publish_locked(client, &entry) == REQUEST_FAILED) {
                 result = REQUEST_FAILED;
@@ -288,7 +288,7 @@ enum request_result client_hello(client_session *client)
     return result;
 }
 
-enum request_result client_logout(client_session *client)
+enum request_result client_logout(ClientSession *client)
 {
     pthread_mutex_lock(&client->mutex);
     enum request_result result = exchange_locked(client, "LOGOUT\n", "OK LOGGED_OUT", REPLY_ERRORS);
@@ -300,7 +300,7 @@ enum request_result client_logout(client_session *client)
     return result;
 }
 
-enum request_result client_share(client_session *client, const char *path)
+enum request_result client_share(ClientSession *client, const char *path)
 {
     char name[FILE_NAME_CAP];
     if (path == NULL || shared_index_add(client->index, path, name) != 0) {
@@ -312,7 +312,7 @@ enum request_result client_share(client_session *client, const char *path)
     if (!client->announced) {
         printf("OK SAVED %s\n", name);
     } else {
-        shared_file entry;
+        SharedFile entry;
         for (size_t i = 0; shared_index_get(client->index, i, &entry); ++i)
             if (strcmp(entry.name, name) == 0) {
                 result = publish_locked(client, &entry);
@@ -323,7 +323,7 @@ enum request_result client_share(client_session *client, const char *path)
     return result;
 }
 
-enum request_result client_unshare(client_session *client, const char *name)
+enum request_result client_unshare(ClientSession *client, const char *name)
 {
     if (name == NULL || !file_name_valid(name)) {
         fputs("Invalid shared filename.\n", stderr);
@@ -350,14 +350,14 @@ enum request_result client_unshare(client_session *client, const char *name)
     return result;
 }
 
-void client_shares(client_session *client)
+void client_shares(ClientSession *client)
 {
-    shared_file entry;
+    SharedFile entry;
     for (size_t i = 0; shared_index_get(client->index, i, &entry); ++i)
         printf("SHARE %s %" PRIu64 " %s\n", entry.name, entry.size, entry.announced ? "ANNOUNCED" : "PENDING");
 }
 
-static bool parse_result(char *line, size_t length, file_result *result)
+static bool parse_result(char *line, size_t length, FileSearchResult *result)
 {
     char *tokens[6];
     uint64_t id, port, size;
@@ -375,7 +375,7 @@ static bool parse_result(char *line, size_t length, file_result *result)
     return true;
 }
 
-enum request_result client_search(client_session *client, const char *query)
+enum request_result client_search(ClientSession *client, const char *query)
 {
     pthread_mutex_lock(&client->mutex);
     client->result_count = 0;
@@ -413,7 +413,7 @@ enum request_result client_search(client_session *client, const char *query)
         goto unlock;
     }
     for (size_t i = 0; i < (size_t)count; ++i) {
-        file_result *entry = &client->results[i];
+        FileSearchResult *entry = &client->results[i];
         if (read_response_locked(client, line, &length) != NET_LINE_OK) {
             result = REQUEST_FAILED;
             goto unlock;
@@ -423,7 +423,7 @@ enum request_result client_search(client_session *client, const char *query)
             goto unlock;
         }
         if (i != 0) {
-            file_result *previous = &client->results[i - 1];
+            FileSearchResult *previous = &client->results[i - 1];
             int order = strcmp(previous->name, entry->name);
             if (order > 0 || (order == 0 && previous->client_id >= entry->client_id)) {
                 result = fail_locked(client);
@@ -434,7 +434,7 @@ enum request_result client_search(client_session *client, const char *query)
     client->result_count = (size_t)count;
     printf("OK RESULTS %zu\n", client->result_count);
     for (size_t i = 0; i < client->result_count; ++i) {
-        file_result *entry = &client->results[i];
+        FileSearchResult *entry = &client->results[i];
         printf("%zu: %s (client %" PRIu32 ", %s:%u, %" PRIu64 " bytes)\n",
                i + 1, entry->name, entry->client_id, entry->ip, (unsigned)entry->port, entry->size);
     }
@@ -444,7 +444,7 @@ unlock:
     return result;
 }
 
-enum request_result client_download(client_session *client, const char *number)
+enum request_result client_download(ClientSession *client, const char *number)
 {
     pthread_mutex_lock(&client->mutex);
     uint64_t selection;
@@ -454,7 +454,7 @@ enum request_result client_download(client_session *client, const char *number)
         fputs("Choose a valid result number from the latest search.\n", stderr);
         return REQUEST_REJECTED;
     }
-    file_result entry = client->results[selection - 1];
+    FileSearchResult entry = client->results[selection - 1];
     pthread_mutex_unlock(&client->mutex);
     const char *failure = download_file(&entry, client->downloads, client->signals);
     if (failure == NULL) {

@@ -9,9 +9,15 @@
  */
 int open_peer_listener(uint16_t port);
 
-typedef struct peer_server peer_server;
-/* Listener remains caller-owned and must outlive the workers. */
-peer_server *peer_server_start(int listener, shared_index *index);
-void peer_server_stop(peer_server *server);
+typedef struct PeerServer PeerServer;
+/* Start bounded upload workers, borrowing listener/index until stop. Returns
+ * owned worker state or NULL/errno. Sets listener nonblocking, including possibly
+ * on failure; never closes that caller-owned listener or destroys the index.
+ */
+PeerServer *peer_server_start(int listener, SharedIndex *index);
+/* Interrupt active sockets, join every worker, and free state. NULL is safe.
+ * Owner-thread operation: do not call concurrently with another stop.
+ */
+void peer_server_stop(PeerServer *server);
 
 #endif

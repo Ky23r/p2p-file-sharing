@@ -202,7 +202,7 @@ static enum input_result read_password(char *password, size_t capacity, bool int
     return result;
 }
 
-static enum request_result account_command(client_session *server, bool registering,
+static enum request_result account_command(ClientSession *server, bool registering,
                                            const char *username, bool interactive, const InputContext *context)
 {
     bool username_valid = valid_username(username);
@@ -240,7 +240,7 @@ static enum request_result account_command(client_session *server, bool register
     return result;
 }
 
-static int run_client(client_session *server, uint32_t id, uint16_t peer_port, ClientSignals *signals)
+static int run_client(ClientSession *server, uint32_t id, uint16_t peer_port, ClientSignals *signals)
 {
     bool interactive = isatty(STDIN_FILENO);
     InputContext input_context = {client_session_failure_fd(server), signals};
@@ -340,9 +340,9 @@ int main(int argc, char **argv)
     }
     int result = EXIT_FAILURE;
     int peer_listener = -1, fd = -1;
-    shared_index *index = NULL;
-    peer_server *peers = NULL;
-    client_session *server = NULL;
+    SharedIndex *index = NULL;
+    PeerServer *peers = NULL;
+    ClientSession *server = NULL;
     uint32_t id;
     if (load_client_id(options.config, &id) != 0) {
         fprintf(stderr, "Client ID file %s: %s\n", options.config, strerror(errno));

@@ -17,19 +17,19 @@
 #define UPLOAD_WORKERS 4U
 
 typedef struct {
-    struct peer_server *server;
+    struct PeerServer *server;
     pthread_t thread;
     int fd;
-} upload_worker;
+} UploadWorker;
 
-struct peer_server {
+struct PeerServer {
     int listener;
     int stop[2];
     pthread_mutex_t mutex;
     bool stopping;
     size_t started;
-    shared_index *index;
-    upload_worker workers[UPLOAD_WORKERS];
+    SharedIndex *index;
+    UploadWorker workers[UPLOAD_WORKERS];
 };
 
 int open_peer_listener(uint16_t port)
@@ -62,7 +62,7 @@ static void peer_error(int fd, const char *code)
     (void)send_all(fd, response, (size_t)length);
 }
 
-static void serve_file(int fd, shared_index *index)
+static void serve_file(int fd, SharedIndex *index)
 {
     net_reader reader;
     net_reader_init(&reader, fd);
@@ -92,7 +92,7 @@ static void serve_file(int fd, shared_index *index)
     char header[64];
     int count = snprintf(header, sizeof(header), "OK FILE %" PRIu64 "\n", size);
     if (send_all(fd, header, (size_t)count) >= 0) {
-        unsigned char buffer[65536];
+        unsigned char buffer[FILE_TRANSFER_BUFFER_SIZE];
         uint64_t remaining = size;
         while (remaining != 0) {
             size_t amount = remaining < sizeof(buffer) ? (size_t)remaining : sizeof(buffer);
@@ -109,8 +109,8 @@ static void serve_file(int fd, shared_index *index)
 
 static void *upload_loop(void *argument)
 {
-    upload_worker *worker = argument;
-    peer_server *server = worker->server;
+    UploadWorker *worker = argument;
+    PeerServer *server = worker->server;
     struct pollfd descriptors[2] = {
         {server->listener, POLLIN, 0}, {server->stop[0], POLLIN, 0}
     };
@@ -142,9 +142,9 @@ static void *upload_loop(void *argument)
     return NULL;
 }
 
-peer_server *peer_server_start(int listener, shared_index *index)
+PeerServer *peer_server_start(int listener, SharedIndex *index)
 {
-    peer_server *server = calloc(1, sizeof(*server));
+    PeerServer *server = calloc(1, sizeof(*server));
     if (server == NULL)
         return NULL;
     server->listener = listener;
@@ -197,7 +197,7 @@ peer_server *peer_server_start(int listener, shared_index *index)
     return server;
 }
 
-void peer_server_stop(peer_server *server)
+void peer_server_stop(PeerServer *server)
 {
     if (server == NULL)
         return;

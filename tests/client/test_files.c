@@ -42,13 +42,13 @@ int main(void)
     int fd = open(source, O_WRONLY | O_CREAT | O_EXCL, 0600);
     assert(fd >= 0 && write(fd, "x\0\ny", 4) == 4);
     close(fd);
-    shared_index *index = shared_index_load(catalog);
+    SharedIndex *index = shared_index_load(catalog);
     assert(index != NULL);
     assert(shared_index_load(catalog) == NULL); /* One writer per catalog. */
     assert(shared_index_add(index, source, decoded) == 0);
     assert(strcmp(decoded, name) == 0);
     assert(shared_index_add(index, source, decoded) == 0); /* Idempotent local add. */
-    shared_file entry;
+    SharedFile entry;
     assert(shared_index_get(index, 0, &entry));
     assert(entry.size == 4 && !entry.announced);
     assert(shared_index_open(index, name, &number) < 0);
@@ -62,7 +62,7 @@ int main(void)
     struct sockaddr_in address;
     socklen_t address_size = sizeof(address);
     assert(getsockname(listener, (struct sockaddr *)&address, &address_size) == 0);
-    peer_server *server = peer_server_start(listener, index);
+    PeerServer *server = peer_server_start(listener, index);
     assert(server != NULL);
     int peer = file_connect("127.0.0.1", ntohs(address.sin_port), NULL);
     assert(peer >= 0);
@@ -88,7 +88,7 @@ int main(void)
     snprintf(downloads, sizeof(downloads), "%s/downloads", directory);
     snprintf(destination, sizeof(destination), "%s/%s", downloads, name);
     assert(mkdir(downloads, 0700) == 0);
-    file_result result = {.client_id = 7, .ip = "127.0.0.1",
+    FileSearchResult result = {.client_id = 7, .ip = "127.0.0.1",
                           .port = ntohs(address.sin_port), .size = 4};
     strcpy(result.name, name);
     assert(download_file(&result, downloads, NULL) == NULL);

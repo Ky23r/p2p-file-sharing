@@ -4,24 +4,29 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <inttypes.h>
 #include <openssl/rand.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-static int download_temporary(int directory, char name[64])
+#define DOWNLOAD_TEMP_ATTEMPTS 8U
+#define DOWNLOAD_TEMP_RANDOM_BYTES 8U
+
+static const char download_temp_prefix[] = ".p2p-download-";
+#define DOWNLOAD_TEMP_NAME_CAP (sizeof(download_temp_prefix) + 2U * DOWNLOAD_TEMP_RANDOM_BYTES)
+
+static int download_temporary(int directory, char name[DOWNLOAD_TEMP_NAME_CAP])
 {
-    for (unsigned attempt = 0; attempt < 8; ++attempt) {
-        unsigned char random[8];
+    for (unsigned attempt = 0; attempt < DOWNLOAD_TEMP_ATTEMPTS; ++attempt) {
+        unsigned char random[DOWNLOAD_TEMP_RANDOM_BYTES];
         if (RAND_bytes(random, sizeof(random)) != 1) {
             errno = EIO;
             return -1;
         }
-        strcpy(name, ".p2p-download-");
+        memcpy(name, download_temp_prefix, sizeof(download_temp_prefix));
         for (size_t i = 0; i < sizeof(random); ++i)
-            snprintf(name + 14 + 2 * i, 3, "%02x", random[i]);
+            snprintf(name + sizeof(download_temp_prefix) - 1 + 2 * i, 3, "%02x", random[i]);
         int fd = openat(directory, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (fd >= 0 || errno != EEXIST)
             return fd;
@@ -35,14 +40,14 @@ static const char *receive_failure(void)
     return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT ? "TIMEOUT" : "INTERRUPTED";
 }
 
-const char *download_file(const file_result *result, const char *directory, ClientSignals *signals)
+const char *download_file(const FileSearchResult *result, const char *directory, ClientSignals *signals)
 {
     int folder = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (folder < 0)
         return "LOCAL_ERROR";
     const char *failure = "LOCAL_ERROR";
     int peer = -1, output = -1;
-    char temporary[64] = "";
+    char temporary[DOWNLOAD_TEMP_NAME_CAP] = "";
     struct stat existing;
     if (fstatat(folder, result->name, &existing, AT_SYMLINK_NOFOLLOW) == 0) {
         errno = EEXIST;
@@ -95,7 +100,7 @@ const char *download_file(const file_result *result, const char *directory, Clie
         errno = EPROTO;
         goto finish;
     }
-    unsigned char buffer[65536];
+    unsigned char buffer[FILE_TRANSFER_BUFFER_SIZE];
     uint64_t remaining = size;
     while (remaining != 0) {
         size_t amount = remaining < sizeof(buffer) ? (size_t)remaining : sizeof(buffer);
