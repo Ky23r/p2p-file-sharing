@@ -15,6 +15,7 @@ class ControlFixture:
         self.logout_response = b"OK LOGGED_OUT\n"
         self.report_response = b"OK REPORTED\n"
         self.close_after_search = False
+        self.hello_responses = []
         fixture = self
 
         class Handler(socketserver.StreamRequestHandler):
@@ -42,7 +43,10 @@ class ControlFixture:
                             elif command == b"HELLO" and len(args) == 2:
                                 candidate = (int(args[0]), self.client_address[0], int(args[1]))
                                 holder = fixture.peers.get(candidate[0])
-                                if holder is not None and holder[0] is not self:
+                                override = fixture.hello_responses.pop(0) if fixture.hello_responses else b"OK HELLO\n"
+                                if override != b"OK HELLO\n":
+                                    response = override
+                                elif holder is not None and holder[0] is not self:
                                     response = b"ERR CLIENT_ID_IN_USE\n"
                                 else:
                                     if candidate != identity:

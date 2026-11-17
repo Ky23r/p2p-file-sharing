@@ -16,6 +16,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#define CLIENT_KEEPALIVE_SECONDS 10
+
 struct client_session {
     net_reader server;
     pthread_mutex_t mutex;
@@ -33,7 +35,7 @@ struct client_session {
     file_result results[FILE_ENTRY_LIMIT];
 };
 
-enum reply_output { REPLY_SILENT, REPLY_ALL, REPLY_ERRORS };
+enum reply_output { REPLY_BACKGROUND, REPLY_ALL, REPLY_ERRORS };
 
 /* Every function ending in _locked requires the control exchange mutex. */
 static void deactivate_locked(client_session *client)
@@ -69,11 +71,13 @@ static int read_response_locked(client_session *client, char *line, size_t *leng
 }
 
 static enum request_result error_response_locked(client_session *client, const char *line,
-                                                  size_t length, bool display)
+                                                  size_t length, enum reply_output output)
 {
     if (!file_error(line, length))
         return fail_locked(client);
-    if (display)
+    if (output == REPLY_BACKGROUND)
+        fprintf(stderr, "Peer keepalive rejected: %s.\n", line);
+    else
         puts(line);
     if (strcmp(line, "ERR SERVER_BUSY") == 0 || strcmp(line, "ERR LINE_TOO_LONG") == 0)
         return fail_locked(client);
@@ -96,7 +100,7 @@ static enum request_result exchange_locked(client_session *client, const char *r
             puts(response);
         return REQUEST_OK;
     }
-    return error_response_locked(client, response, length, output != REPLY_SILENT);
+    return error_response_locked(client, response, length, output);
 }
 
 static enum request_result hello_locked(client_session *client, enum reply_output output)
@@ -150,7 +154,7 @@ static void *keepalive_loop(void *argument)
             fail_locked(client);
             break;
         }
-        deadline.tv_sec += 10;
+        deadline.tv_sec += CLIENT_KEEPALIVE_SECONDS;
         int status = 0;
         while (status == 0 && !client->stopping && !client->failed)
             status = pthread_cond_timedwait(&client->wake, &client->mutex, &deadline);
@@ -160,8 +164,11 @@ static void *keepalive_loop(void *argument)
             fail_locked(client);
             break;
         }
-        if (client->announced && hello_locked(client, REPLY_SILENT) != REQUEST_OK)
-            deactivate_locked(client);
+        /* A rejected HELLO leaves the server's previous registration intact.
+         * Transport/framing failures already deactivate the peer in fail_locked.
+         */
+        if (client->announced)
+            (void)hello_locked(client, REPLY_BACKGROUND);
     }
     pthread_mutex_unlock(&client->mutex);
     return NULL;
@@ -382,7 +389,7 @@ enum request_result client_search(client_session *client, const char *query)
         goto unlock;
     }
     if (file_error(line, length)) {
-        result = error_response_locked(client, line, length, true);
+        result = error_response_locked(client, line, length, REPLY_ALL);
         goto unlock;
     }
     char *tokens[3];

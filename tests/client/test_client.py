@@ -406,6 +406,32 @@ class ClientFileTests(unittest.TestCase):
             self.assertIn(b"66696c652e62696e", self.server.peers[1][2])
         self.assertEqual(self.peer_get(client, "file.bin"), b"OK FILE 4\ndata")
 
+    def test_rejected_keepalive_preserves_serving_and_automatic_retry(self):
+        self.server.hello_responses = [b"OK HELLO\n", b"ERR INTERNAL_ERROR\n", b"OK HELLO\n"]
+        client = self.client()
+        client.login()
+        self.share(client, "file.bin", b"data")
+
+        def await_hellos(count):
+            deadline = time.monotonic() + 13
+            while time.monotonic() < deadline:
+                with self.server.lock:
+                    received = sum(line.startswith(b"HELLO ") for line in self.server.requests)
+                if received >= count:
+                    return
+                time.sleep(0.02)
+            self.fail(f"Expected {count} HELLO requests, received {received}")
+
+        await_hellos(2)
+        client.send("shares")
+        client.expect("SHARE file.bin 4 ANNOUNCED")
+        self.assertEqual(self.peer_get(client, "file.bin"), b"OK FILE 4\ndata")
+        self.assertIn("ERR INTERNAL_ERROR", client.errors())
+        with self.server.lock:
+            self.assertIn(b"66696c652e62696e", self.server.peers[1][2])
+        await_hellos(3)
+        self.assertEqual(self.peer_get(client, "file.bin"), b"OK FILE 4\ndata")
+
     def test_quit_joins_workers_with_partial_requests(self):
         client = self.client()
         client.login()

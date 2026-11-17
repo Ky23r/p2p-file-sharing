@@ -58,6 +58,9 @@ requests. Transport inactivity closes the connection without a response.
 The client silently repeats its successful HELLO every 10 seconds to preserve an
 idle authenticated connection, including during a long peer transfer. Repeating
 the same ID/port is idempotent and must preserve the session's shared-file index.
+A rejected background HELLO is reported on stderr and retains the previous
+announcement and future automatic retries. Transport errors, invalid responses,
+and the connection-closing SERVER_BUSY/LINE_TOO_LONG errors still disable serving.
 
 ## File-discovery extension (server implementation pending)
 
