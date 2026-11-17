@@ -5,6 +5,13 @@ The centralized control server provides registration, authentication, and
 connection-local sessions. The terminal client sends account commands and
 announces its persistent peer identity to the server.
 
+The client also implements a persistent local share catalog, file-discovery
+requests, and direct peer uploads/downloads. **The production server's file-index,
+search, and failure-report handlers are still pending Member 1 work.** The new
+client behavior is tested against a test-only discovery server; the existing
+production server continues to support account/session commands. The complete
+integration contract is in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+
 Install `build-essential libssl-dev python3`, then run:
 
 ```sh
@@ -44,6 +51,11 @@ settings can also be supplied explicitly.
 | `login alice` | Prompt for a password, log in, and send `HELLO` |
 | `hello` | Send the client ID and peer port again on the current connection |
 | `logout` | End the session and release the client ID |
+| `share PATH` | Persist a local file and announce it when the peer is registered |
+| `unshare NAME` | Remove a share from the server and local catalog |
+| `shares` | List local files as `PENDING` or `ANNOUNCED` |
+| `search QUERY` | Search filenames and display numbered peers |
+| `download NUMBER` | Download a result from the latest search |
 | `help` | Show commands |
 | `quit` | Close the connection and exit |
 
@@ -60,8 +72,37 @@ can retry the announcement.
 
 The client opens an IPv4 TCP listener on `--peer-port` (default `9001`) before
 connecting to the control server. `HELLO` announces that port after login.
-For multiple clients on the same machine, choose distinct peer ports and config
-files. File serving and direct downloads belong to the P2P transfer milestone.
+Four upload workers accept peer requests and serve files that have been announced
+successfully on the active control session. An idle authenticated client repeats
+HELLO every 10 seconds so the control connection survives the server's 30-second
+inactivity limit. Transport failures disable new uploads and end the CLI.
+
+`--index PATH` selects the local catalog (default `index.txt`), and `--downloads
+DIRECTORY` selects an existing trusted download directory (default `.`). Use
+distinct peer ports, config files, catalogs, and download directories for multiple
+clients. File arguments are the literal remainder of a command line, so spaces
+and UTF-8 names work without quotes. Share names are canonical path basenames.
+
+```sh
+./client --peer-port 9001 --config peer-a.txt --index shares-a.txt --downloads downloads-a
+./client --peer-port 9002 --config peer-b.txt --index shares-b.txt --downloads downloads-b
+```
+
+The directories must already exist. With the server extension integrated, use
+`share /path/to/report.pdf`, `search report`, then `download 1` on the receiving
+client. On the current production server, file control requests return errors
+because those handlers are not implemented yet. `tests/client/control_fixture.py`
+implements the contract only for automated tests; it accepts test logins and must
+not be used as a real account server.
+
+Local shares survive logout/restart and are reannounced after login/HELLO. Missing
+or rejected files remain pending and cannot be served. `unshare` preserves the
+source file. An already opened upload may finish after unshare/logout. Downloads
+use bounded binary buffers, require exact size and clean EOF, and publish a
+mode-0600 completed file without overwriting an existing path. Failed transfers
+remove their temporary file and report the peer failure when control is available;
+local storage errors are not reported as peer failures. No resume or content hash
+is provided; shared sources must remain unchanged during transfer.
 
 ## Control protocol
 
@@ -131,12 +172,18 @@ client ID uniqueness. Completed workers are regularly joined and freed; shutdown
 also waits for credential operations already in progress. Auth and session locks
 are never held together; expensive KDF work runs outside both locks.
 
-`make test` runs the C socket tests and Python standard-library TCP integration
+`make test` runs C socket/catalog/upload tests and Python standard-library TCP integration
 tests using temporary data and available local ports. Client tests cover account
 commands, reachable peer announcements, port conflicts, ID persistence, terminal
 input, and invalid server replies. Server tests cover concurrent accounts and sessions, persistence and hash
 verification, malformed input, storage failures, client limits, descriptor/thread
 cleanup, and graceful shutdown.
+`tests/client/test_client.py` runs real client processes against a discovery
+fixture and real peer sockets: registration/removal/search, source selection,
+binary/empty/fragmented transfers, parallel uploads, malformed headers/results,
+partial-transfer cleanup/reporting, no-clobber destinations, persistent catalogs,
+reannouncement, idle keepalive, and prompt shutdown on control failure. The fixture
+does not replace testing the production server extension once Member 1 adds it.
 The permission-denial test drops privileges when run as root; it is skipped for
 an unprivileged test runner. AddressSanitizer/UndefinedBehaviorSanitizer builds can
 be run with the same suite:
