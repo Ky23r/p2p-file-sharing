@@ -8,7 +8,7 @@ SERVER_SOURCES = src/server/server.c src/server/auth.c src/server/session.c src/
 SERVER_OBJECTS = $(SERVER_SOURCES:src/%.c=build/%.o)
 CLIENT_SOURCES = src/client/client.c src/client/config.c src/client/peer_server.c \
                  src/client/file_protocol.c src/client/shared_index.c \
-                 src/client/transfer.c src/common/net_io.c
+                 src/client/transfer.c src/client/client_session.c src/common/net_io.c
 CLIENT_OBJECTS = $(CLIENT_SOURCES:src/%.c=build/%.o)
 NET_TEST = build/tests/test_net_io
 FILES_TEST = build/tests/test_files
@@ -39,6 +39,7 @@ test: server client $(NET_TEST) $(FILES_TEST)
 	./$(FILES_TEST)
 	./server --help
 	python3 -m unittest discover -s tests/server -p 'test_server.py' -v
+	python3 -m unittest discover -s tests/client -p 'test_client.py' -v
 
 clean:
 	rm -rf build server client

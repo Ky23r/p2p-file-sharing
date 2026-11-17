@@ -1,5 +1,5 @@
 #include "config.h"
-#include "net_io.h"
+#include "client_session.h"
 #include "peer_server.h"
 #include "protocol.h"
 
@@ -7,33 +7,34 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <openssl/crypto.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <termios.h>
 #include <unistd.h>
 
 #define DEFAULT_CONFIG "config.txt"
 #define DEFAULT_PEER_PORT 9001U
-#define SOCKET_TIMEOUT_SECONDS 30
 
 typedef struct {
     const char *ip;
     const char *config;
+    const char *index;
+    const char *downloads;
     uint16_t server_port;
     uint16_t peer_port;
 } client_options;
 
-enum request_result { REQUEST_FAILED = -1, REQUEST_REJECTED, REQUEST_OK };
 enum input_result { INPUT_END, INPUT_ERROR, INPUT_INVALID, INPUT_OK };
 
 /* The saved settings are available to the signal handler during password entry. */
 static struct termios terminal_settings;
 static volatile sig_atomic_t password_entry;
+static int control_failure_fd = -1;
 
 static void restore_terminal_on_signal(int number)
 {
@@ -61,6 +62,7 @@ static void usage(FILE *stream, const char *program)
 {
     fprintf(stream, "Usage: %s [--server IPv4] [--port 1..65535]\n"
                     "       [--peer-port 1..65535] [--config PATH]\n"
+                    "       [--index PATH] [--downloads DIRECTORY]\n"
                     "       %s --help\n"
                     "Defaults: server %s:%u, peer port %u, config %s\n",
             program, program, DEFAULT_SERVER_IP, DEFAULT_SERVER_PORT,
@@ -73,6 +75,11 @@ static void commands(void)
          "login USER      Log in and announce the peer port\n"
          "hello           Announce the client ID and peer port again\n"
          "logout          Log out and keep the connection open\n"
+         "share PATH      Save and announce a local file (spaces allowed)\n"
+         "unshare NAME    Stop sharing a filename\n"
+         "shares          List local shares and announcement state\n"
+         "search QUERY    Find available peers by filename substring\n"
+         "download NUMBER Download a result from the latest search\n"
          "help            Show commands\n"
          "quit            Close the connection and exit");
 }
@@ -100,6 +107,10 @@ static bool parse_options(int argc, char **argv, client_options *options)
             options->ip = value;
         else if (strcmp(option, "--config") == 0)
             options->config = value;
+        else if (strcmp(option, "--index") == 0)
+            options->index = value;
+        else if (strcmp(option, "--downloads") == 0)
+            options->downloads = value;
         else if (strcmp(option, "--port") == 0) {
             if (!parse_port(value, &options->server_port))
                 return false;
@@ -113,71 +124,33 @@ static bool parse_options(int argc, char **argv, client_options *options)
     return true;
 }
 
-static int connect_server(const struct sockaddr_in *address)
-{
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0)
-        return -1;
-
-    const struct timeval timeout = {SOCKET_TIMEOUT_SECONDS, 0};
-    if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0 &&
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0 &&
-        connect(fd, (const struct sockaddr *)address, sizeof(*address)) == 0)
-        return fd;
-
-    int error = errno;
-    close(fd);
-    errno = error == EINPROGRESS ? ETIMEDOUT : error;
-    return -1;
-}
-
-static enum request_result exchange(net_reader *server, const char *request,
-                                    const char *expected)
-{
-    if (send_all(server->fd, request, strlen(request)) < 0) {
-        perror("Sending request to server");
-        return REQUEST_FAILED;
-    }
-
-    char response[PROTOCOL_MAX_LINE + 1];
-    size_t length;
-    int result = recv_line(server, response, sizeof(response), &length);
-    if (result == NET_LINE_ERROR) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
-            fputs("Timed out waiting for the server.\n", stderr);
-        else
-            perror("Reading response from server");
-    } else if (result == NET_LINE_EOF) {
-        fputs("Server closed the connection.\n", stderr);
-    } else if (result == NET_LINE_OK && length == strlen(expected) &&
-               memcmp(response, expected, length) == 0) {
-        puts(response);
-        return REQUEST_OK;
-    } else if (result == NET_LINE_OK && length > 4 && memcmp(response, "ERR ", 4) == 0 &&
-               strspn(response + 4, "ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789") == length - 4) {
-        puts(response);
-        if (strcmp(response, "ERR SERVER_BUSY") != 0 && strcmp(response, "ERR LINE_TOO_LONG") != 0)
-            return REQUEST_REJECTED;
-    } else {
-        fputs("Invalid response from server.\n", stderr);
-    }
-    return REQUEST_FAILED;
-}
-
-static enum request_result announce_peer(net_reader *server, uint32_t id, uint16_t port)
-{
-    char request[sizeof("HELLO 4294967295 65535\n")];
-    snprintf(request, sizeof(request), "HELLO %" PRIu32 " %u\n", id, (unsigned)port);
-    return exchange(server, request, "OK HELLO");
-}
-
 /* Drain excess bytes before reading the next line. */
 static enum input_result read_input(char *line, size_t capacity)
 {
     size_t length = 0;
     bool invalid = false;
     int byte;
-    while ((byte = getchar()) != '\n' && byte != EOF) {
+    for (;;) {
+        struct pollfd descriptors[2] = {
+            {STDIN_FILENO, POLLIN, 0}, {control_failure_fd, POLLIN, 0}
+        };
+        int ready;
+        do {
+            ready = poll(descriptors, 2, -1);
+        } while (ready < 0 && errno == EINTR);
+        if (ready < 0)
+            return INPUT_ERROR;
+        if (descriptors[1].revents != 0) {
+            errno = ECONNRESET;
+            return INPUT_ERROR;
+        }
+        if (descriptors[0].revents & POLLNVAL) {
+            errno = EBADF;
+            return INPUT_ERROR;
+        }
+        byte = getchar();
+        if (byte == '\n' || byte == EOF)
+            break;
         if (byte == '\0' || length == capacity - 1)
             invalid = true;
         else
@@ -242,7 +215,7 @@ static enum input_result read_password(char *password, size_t capacity, bool int
     return result;
 }
 
-static enum request_result account_command(net_reader *server, bool registering,
+static enum request_result account_command(client_session *server, bool registering,
                                            const char *username, bool interactive)
 {
     bool username_valid = valid_username(username);
@@ -274,12 +247,12 @@ static enum request_result account_command(net_reader *server, bool registering,
     snprintf(request, sizeof(request), "%s %s %s\n", registering ? "REGISTER" : "LOGIN",
              username, password);
     OPENSSL_cleanse(password, sizeof(password));
-    enum request_result result = exchange(server, request, registering ? "OK REGISTERED" : "OK LOGGED_IN");
+    enum request_result result = client_exchange(server, request, registering ? "OK REGISTERED" : "OK LOGGED_IN");
     OPENSSL_cleanse(request, sizeof(request));
     return result;
 }
 
-static int run_client(net_reader *server, uint32_t id, uint16_t peer_port)
+static int run_client(client_session *server, uint32_t id, uint16_t peer_port)
 {
     bool interactive = isatty(STDIN_FILENO);
     if (interactive) {
@@ -296,10 +269,10 @@ static int run_client(net_reader *server, uint32_t id, uint16_t peer_port)
             fputs("p2p> ", stdout);
             fflush(stdout);
         }
-        char line[PROTOCOL_MAX_LINE + 1];
+        char line[FILE_PATH_CAP + 32];
         enum input_result input = read_input(line, sizeof(line));
         if (input == INPUT_END)
-            return EXIT_SUCCESS;
+            return client_session_failed(server) ? EXIT_FAILURE : EXIT_SUCCESS;
         if (input == INPUT_ERROR) {
             perror("Reading command");
             return EXIT_FAILURE;
@@ -310,6 +283,8 @@ static int run_client(net_reader *server, uint32_t id, uint16_t peer_port)
         }
         if (*line == '\0')
             continue;
+        if (client_session_failed(server))
+            return EXIT_FAILURE;
 
         char *argument = strchr(line, ' ');
         if (argument != NULL) {
@@ -321,13 +296,23 @@ static int run_client(net_reader *server, uint32_t id, uint16_t peer_port)
         if (registering || strcmp(line, "login") == 0) {
             result = account_command(server, registering, argument, interactive);
             if (!registering && result == REQUEST_OK)
-                result = announce_peer(server, id, peer_port);
+                result = client_hello(server);
+        } else if (strcmp(line, "share") == 0) {
+            result = client_share(server, argument);
+        } else if (strcmp(line, "unshare") == 0) {
+            result = client_unshare(server, argument);
+        } else if (strcmp(line, "search") == 0) {
+            result = client_search(server, argument);
+        } else if (strcmp(line, "download") == 0) {
+            result = client_download(server, argument);
         } else if (argument != NULL) {
             fputs("Unexpected argument. Type 'help' for commands.\n", stderr);
         } else if (strcmp(line, "hello") == 0) {
-            result = announce_peer(server, id, peer_port);
+            result = client_hello(server);
         } else if (strcmp(line, "logout") == 0) {
-            result = exchange(server, "LOGOUT\n", "OK LOGGED_OUT");
+            result = client_logout(server);
+        } else if (strcmp(line, "shares") == 0) {
+            client_shares(server);
         } else if (strcmp(line, "help") == 0) {
             commands();
         } else if (strcmp(line, "quit") == 0) {
@@ -342,7 +327,8 @@ static int run_client(net_reader *server, uint32_t id, uint16_t peer_port)
 
 int main(int argc, char **argv)
 {
-    client_options options = {DEFAULT_SERVER_IP, DEFAULT_CONFIG, DEFAULT_SERVER_PORT, DEFAULT_PEER_PORT};
+    client_options options = {DEFAULT_SERVER_IP, DEFAULT_CONFIG, "index.txt", ".",
+                              DEFAULT_SERVER_PORT, DEFAULT_PEER_PORT};
     if (argc == 2 && strcmp(argv[1], "--help") == 0) {
         usage(stdout, argv[0]);
         commands();
@@ -373,19 +359,45 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    int fd = connect_server(&address);
+    shared_index *index = shared_index_load(options.index);
+    if (index == NULL) {
+        fprintf(stderr, "Shared-file index %s: %s\n", options.index, strerror(errno));
+        close(peer_listener);
+        return EXIT_FAILURE;
+    }
+    peer_server *peers = peer_server_start(peer_listener, index);
+    if (peers == NULL) {
+        perror("Starting peer workers");
+        shared_index_destroy(index);
+        close(peer_listener);
+        return EXIT_FAILURE;
+    }
+    int fd = file_connect(options.ip, options.server_port);
     if (fd < 0) {
         fprintf(stderr, "Connecting to %s:%u: %s\n", options.ip,
                 (unsigned)options.server_port, strerror(errno));
+        peer_server_stop(peers);
+        shared_index_destroy(index);
         close(peer_listener);
         return EXIT_FAILURE;
     }
 
     setvbuf(stdout, NULL, _IOLBF, 0);
-    net_reader server;
-    net_reader_init(&server, fd);
-    int result = run_client(&server, id, options.peer_port);
+    /* Input polling must see every byte, including redirected multi-line input. */
+    setvbuf(stdin, NULL, _IONBF, 0);
+    client_session *server = client_session_start(fd, id, options.peer_port, index, options.downloads);
+    int result = EXIT_FAILURE;
+    if (server == NULL)
+        perror("Starting control session");
+    else {
+        control_failure_fd = client_session_failure_fd(server);
+        result = run_client(server, id, options.peer_port);
+        control_failure_fd = -1;
+    }
+    client_session_stop(server);
     close(fd);
+    peer_server_stop(peers);
+    shared_index_destroy(index);
     close(peer_listener);
     return result;
 }
