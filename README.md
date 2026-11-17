@@ -104,6 +104,11 @@ remove their temporary file and report the peer failure when control is availabl
 local storage errors are not reported as peer failures. No resume or content hash
 is provided; shared sources must remain unchanged during transfer.
 
+Ctrl+C and SIGTERM cancel a pending download, remove its partial temporary file,
+restore terminal echo, and stop/join client workers before exiting with 130/143.
+Cancellation is local and is not reported as a failed peer. A successfully
+published complete file is retained.
+
 ## Control protocol
 
 Each ASCII request ends with LF, with at most 4096 bytes **excluding LF**.

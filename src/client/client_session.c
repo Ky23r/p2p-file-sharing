@@ -31,6 +31,7 @@ struct client_session {
     uint16_t port;
     shared_index *index;
     const char *downloads;
+    ClientSignals *signals;
     size_t result_count;
     file_result results[FILE_ENTRY_LIMIT];
 };
@@ -57,7 +58,7 @@ static enum request_result fail_locked(client_session *client)
     client->failed = true;
     deactivate_locked(client);
     shutdown(client->server.fd, SHUT_RDWR);
-    if (!client->stopping)
+    if (!client->stopping && client_signals_number(client->signals) == 0)
         fputs("Invalid response from server or control connection failed. Restart the client to reconnect.\n", stderr);
     return REQUEST_FAILED;
 }
@@ -175,7 +176,7 @@ static void *keepalive_loop(void *argument)
 }
 
 client_session *client_session_start(int fd, uint32_t id, uint16_t port,
-                                     shared_index *index, const char *downloads)
+                                     shared_index *index, const char *downloads, ClientSignals *signals)
 {
     client_session *client = calloc(1, sizeof(*client));
     if (client == NULL)
@@ -187,6 +188,7 @@ client_session *client_session_start(int fd, uint32_t id, uint16_t port,
     client->port = port;
     client->index = index;
     client->downloads = downloads;
+    client->signals = signals;
     int error = pthread_mutex_init(&client->mutex, NULL);
     if (error != 0)
         goto free_client;
@@ -199,7 +201,18 @@ client_session *client_session_start(int fd, uint32_t id, uint16_t port,
         error = errno;
         goto close_failure;
     }
+    sigset_t previous_mask;
+    if (client_signals_block_workers(&previous_mask) != 0) {
+        error = errno;
+        goto close_failure;
+    }
     error = pthread_create(&client->heartbeat, NULL, keepalive_loop, client);
+    int mask_error = pthread_sigmask(SIG_SETMASK, &previous_mask, NULL);
+    if (error == 0 && mask_error != 0) {
+        client_session_stop(client);
+        errno = mask_error;
+        return NULL;
+    }
     if (error == 0)
         return client;
 close_failure:
@@ -443,11 +456,13 @@ enum request_result client_download(client_session *client, const char *number)
     }
     file_result entry = client->results[selection - 1];
     pthread_mutex_unlock(&client->mutex);
-    const char *failure = download_file(&entry, client->downloads);
+    const char *failure = download_file(&entry, client->downloads, client->signals);
     if (failure == NULL) {
         printf("OK DOWNLOADED %s\n", entry.name);
         return REQUEST_OK;
     }
+    if (strcmp(failure, "CANCELLED") == 0)
+        return REQUEST_FAILED;
     fprintf(stderr, "Download %s from client %" PRIu32 " at %s:%u failed: %s (%s).\n",
             entry.name, entry.client_id, entry.ip, (unsigned)entry.port, failure, strerror(errno));
     if (strcmp(failure, "LOCAL_ERROR") == 0)

@@ -169,16 +169,30 @@ peer_server *peer_server_start(int listener, shared_index *index)
         errno = error;
         return NULL;
     }
+    sigset_t previous_mask;
+    if (client_signals_block_workers(&previous_mask) != 0) {
+        error = errno;
+        peer_server_stop(server);
+        errno = error;
+        return NULL;
+    }
     for (size_t i = 0; i < UPLOAD_WORKERS; ++i) {
         server->workers[i].server = server;
         server->workers[i].fd = -1;
         error = pthread_create(&server->workers[i].thread, NULL, upload_loop, &server->workers[i]);
         if (error != 0) {
             peer_server_stop(server);
+            pthread_sigmask(SIG_SETMASK, &previous_mask, NULL);
             errno = error;
             return NULL;
         }
         server->started++;
+    }
+    error = pthread_sigmask(SIG_SETMASK, &previous_mask, NULL);
+    if (error != 0) {
+        peer_server_stop(server);
+        errno = error;
+        return NULL;
     }
     return server;
 }

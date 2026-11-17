@@ -35,7 +35,7 @@ static const char *receive_failure(void)
     return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT ? "TIMEOUT" : "INTERRUPTED";
 }
 
-const char *download_file(const file_result *result, const char *directory)
+const char *download_file(const file_result *result, const char *directory, ClientSignals *signals)
 {
     int folder = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (folder < 0)
@@ -55,7 +55,7 @@ const char *download_file(const file_result *result, const char *directory)
         temporary[0] = '\0'; /* An O_EXCL failure never authorizes removing a file. */
         goto finish;
     }
-    peer = file_connect(result->ip, result->port);
+    peer = file_connect(result->ip, result->port, signals);
     if (peer < 0) {
         failure = errno == ETIMEDOUT || errno == EAGAIN ? "TIMEOUT" : "CONNECT_FAILED";
         goto finish;
@@ -127,6 +127,8 @@ const char *download_file(const file_result *result, const char *directory)
         goto finish;
     }
     failure = "LOCAL_ERROR";
+    if (client_signals_number(signals) != 0)
+        goto finish;
     if (fsync(output) != 0)
         goto finish;
     int closed = close(output);
@@ -136,10 +138,14 @@ const char *download_file(const file_result *result, const char *directory)
     failure = NULL;
 finish:;
     int error = errno;
+    if (failure != NULL && client_signals_number(signals) != 0) {
+        failure = "CANCELLED";
+        error = ECANCELED;
+    }
     if (output >= 0)
         close(output);
     if (peer >= 0)
-        close(peer);
+        client_signals_close_socket(signals, peer);
     if (*temporary)
         unlinkat(folder, temporary, 0);
     close(folder);

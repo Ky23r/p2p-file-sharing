@@ -2,6 +2,8 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -119,7 +121,7 @@ int file_socket_timeout(int fd)
     return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 }
 
-int file_connect(const char *ip, uint16_t port)
+int file_connect(const char *ip, uint16_t port, ClientSignals *signals)
 {
     struct sockaddr_in address = {0};
     address.sin_family = AF_INET;
@@ -131,10 +133,52 @@ int file_connect(const char *ip, uint16_t port)
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0)
         return -1;
-    if (file_socket_timeout(fd) == 0 && connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0)
+    if (client_signals_watch_socket(signals, fd) != 0) {
+        int error = errno;
+        close(fd);
+        errno = error;
+        return -1;
+    }
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0 || file_socket_timeout(fd) != 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0)
+        goto fail;
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+        if (errno != EINPROGRESS)
+            goto fail;
+        struct pollfd descriptors[2] = {
+            {fd, POLLOUT, 0}, {client_signals_fd(signals), POLLIN, 0}
+        };
+        int ready;
+        do {
+            ready = poll(descriptors, 2, FILE_TIMEOUT_SECONDS * 1000);
+        } while (ready < 0 && errno == EINTR && client_signals_number(signals) == 0);
+        if (client_signals_number(signals) != 0) {
+            errno = ECANCELED;
+            goto fail;
+        }
+        if (ready <= 0) {
+            if (ready == 0)
+                errno = ETIMEDOUT;
+            goto fail;
+        }
+        int socket_error;
+        socklen_t error_size = sizeof(socket_error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_size) != 0)
+            goto fail;
+        if (socket_error != 0) {
+            errno = socket_error;
+            goto fail;
+        }
+    }
+    if (client_signals_number(signals) != 0) {
+        errno = ECANCELED;
+        goto fail;
+    }
+    if (fcntl(fd, F_SETFL, flags) == 0)
         return fd;
+fail:;
     int error = errno;
-    close(fd);
-    errno = error == EINPROGRESS ? ETIMEDOUT : error;
+    client_signals_close_socket(signals, fd);
+    errno = error;
     return -1;
 }

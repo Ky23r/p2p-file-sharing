@@ -157,6 +157,14 @@ overwriting an existing file or symlink. Failures remove only that temporary fil
 Downloaded files are not automatically shared. Compare file contents in tests;
 there is no content hash, TLS, NAT traversal, or peer identity proof in this version.
 
+HUP/INT/QUIT/TERM/PIPE request orderly client shutdown. The main thread handles
+these signals, interrupts its control/download sockets, and wakes terminal input;
+workers inherit them blocked. Cancellation removes an unpublished download's
+temporary file without reporting a peer failure, restores password echo, joins
+workers, and exits with `128 + signal`. An already published complete file stays.
+The signal controller blocks handled signals before capturing final exit status;
+signals pending after that teardown boundary use the previous dispositions.
+
 ## Local client catalog and CLI
 
 `--index PATH` defaults to `index.txt`; `--downloads DIRECTORY` defaults to `.`.

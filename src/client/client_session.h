@@ -8,7 +8,7 @@ typedef struct client_session client_session;
 
 /* fd remains caller-owned; start/stop encompass the background keepalive. */
 client_session *client_session_start(int fd, uint32_t id, uint16_t port,
-                                     shared_index *index, const char *downloads);
+                                     shared_index *index, const char *downloads, ClientSignals *signals);
 void client_session_stop(client_session *client);
 enum request_result client_exchange(client_session *client, const char *request, const char *expected);
 enum request_result client_hello(client_session *client);

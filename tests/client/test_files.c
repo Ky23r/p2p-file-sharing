@@ -64,7 +64,7 @@ int main(void)
     assert(getsockname(listener, (struct sockaddr *)&address, &address_size) == 0);
     peer_server *server = peer_server_start(listener, index);
     assert(server != NULL);
-    int peer = file_connect("127.0.0.1", ntohs(address.sin_port));
+    int peer = file_connect("127.0.0.1", ntohs(address.sin_port), NULL);
     assert(peer >= 0);
     char request[FILE_NAME_HEX_CAP + 8];
     snprintf(request, sizeof(request), "GET %s\n", encoded);
@@ -91,19 +91,19 @@ int main(void)
     file_result result = {.client_id = 7, .ip = "127.0.0.1",
                           .port = ntohs(address.sin_port), .size = 4};
     strcpy(result.name, name);
-    assert(download_file(&result, downloads) == NULL);
+    assert(download_file(&result, downloads, NULL) == NULL);
     struct stat downloaded;
     assert(stat(destination, &downloaded) == 0 && (downloaded.st_mode & 0777) == 0600);
     fd = open(destination, O_RDONLY);
     assert(fd >= 0 && read(fd, body, sizeof(body)) == 4 && memcmp(body, "x\0\ny", 4) == 0);
     close(fd);
-    assert(strcmp(download_file(&result, downloads), "LOCAL_ERROR") == 0 && errno == EEXIST);
+    assert(strcmp(download_file(&result, downloads, NULL), "LOCAL_ERROR") == 0 && errno == EEXIST);
     assert(unlink(destination) == 0);
     result.size = 3;
-    assert(strcmp(download_file(&result, downloads), "SIZE_MISMATCH") == 0);
+    assert(strcmp(download_file(&result, downloads, NULL), "SIZE_MISMATCH") == 0);
     assert(access(destination, F_OK) < 0 && errno == ENOENT);
     assert(rmdir(downloads) == 0); /* No partial temporary download remains. */
-    peer = file_connect("127.0.0.1", ntohs(address.sin_port));
+    peer = file_connect("127.0.0.1", ntohs(address.sin_port), NULL);
     assert(peer >= 0); /* Stop must also interrupt a stalled request. */
     peer_server_stop(server);
     close(peer);
@@ -135,6 +135,12 @@ int main(void)
     unlink(catalog);
     unlink(lock);
     rmdir(directory);
+    ClientSignals *signals = client_signals_start();
+    assert(signals != NULL);
+    assert(client_signals_number(signals) == 0);
+    /* A signal after an earlier observation must still determine final status. */
+    assert(raise(SIGINT) == 0);
+    assert(client_signals_stop(signals) == SIGINT);
     puts("client files: encoding, limits, catalog persistence and authorization passed");
     return 0;
 }
