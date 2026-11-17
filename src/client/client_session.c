@@ -33,7 +33,7 @@ struct ClientSession {
     const char *downloads;
     ClientSignals *signals;
     size_t result_count;
-    FileSearchResult results[FILE_ENTRY_LIMIT];
+    FileSearchResult results[PROTOCOL_PEER_LIMIT];
 };
 
 enum reply_output { REPLY_BACKGROUND, REPLY_ALL, REPLY_ERRORS };
@@ -85,18 +85,30 @@ static enum request_result error_response_locked(ClientSession *client, const ch
     return REQUEST_REJECTED;
 }
 
+static bool request_locked(ClientSession *client, const char *request, char *response, size_t *length)
+{
+    if (client->failed)
+        return false;
+    if (send_all(client->server.fd, request, strlen(request)) < 0) {
+        fail_locked(client);
+        return false;
+    }
+    return read_response_locked(client, response, length) == NET_LINE_OK;
+}
+
+static bool response_is(const char *response, size_t length, const char *expected)
+{
+    return length == strlen(expected) && memcmp(response, expected, length) == 0;
+}
+
 static enum request_result exchange_locked(ClientSession *client, const char *request,
                                            const char *expected, enum reply_output output)
 {
-    if (client->failed)
-        return REQUEST_FAILED;
-    if (send_all(client->server.fd, request, strlen(request)) < 0)
-        return fail_locked(client);
     char response[PROTOCOL_MAX_LINE + 1];
     size_t length;
-    if (read_response_locked(client, response, &length) != NET_LINE_OK)
+    if (!request_locked(client, request, response, &length))
         return REQUEST_FAILED;
-    if (length == strlen(expected) && memcmp(response, expected, length) == 0) {
+    if (response_is(response, length, expected)) {
         if (output == REPLY_ALL)
             puts(response);
         return REQUEST_OK;
@@ -111,37 +123,51 @@ static enum request_result hello_locked(ClientSession *client, enum reply_output
     return exchange_locked(client, request, "OK HELLO", output);
 }
 
-static enum request_result withdraw_locked(ClientSession *client, const SharedFile *entry)
+static enum request_result unshare_locked(ClientSession *client, const char *token)
 {
-    if (!entry->announced)
+    char request[FILE_NAME_TOKEN_CAP + sizeof("UNSHARE \n")];
+    snprintf(request, sizeof(request), "UNSHARE %s\n", token);
+    char response[PROTOCOL_MAX_LINE + 1];
+    size_t length;
+    if (!request_locked(client, request, response, &length))
+        return REQUEST_FAILED;
+    /* FILE_NOT_FOUND also confirms the advertisement is absent. */
+    if (response_is(response, length, "OK UNSHARED") || response_is(response, length, "ERR FILE_NOT_FOUND"))
         return REQUEST_OK;
-    char encoded[FILE_NAME_HEX_CAP], request[FILE_NAME_HEX_CAP + 16];
-    file_hex_encode(entry->name, encoded, sizeof(encoded));
-    snprintf(request, sizeof(request), "UNSHARE %s\n", encoded);
-    return exchange_locked(client, request, "OK UNSHARED", REPLY_ALL);
+    return error_response_locked(client, response, length, REPLY_ERRORS);
 }
 
 static enum request_result publish_locked(ClientSession *client, const SharedFile *entry)
 {
     shared_index_mark(client->index, entry->name, false, entry->size);
-    uint64_t size;
-    int source = shared_file_open(entry->path, &size);
-    if (source < 0) {
-        fprintf(stderr, "Share %s remains pending: %s.\n", entry->name, strerror(errno));
-        if (withdraw_locked(client, entry) == REQUEST_FAILED)
-            return REQUEST_FAILED;
+    char token[FILE_NAME_TOKEN_CAP];
+    if (!protocol_encode_filename(entry->name, token, sizeof(token))) {
+        fprintf(stderr, "Share %s remains pending: filenames must be printable ASCII basenames.\n", entry->name);
         return REQUEST_REJECTED;
     }
-    close(source);
-    char name[FILE_NAME_HEX_CAP], request[FILE_NAME_HEX_CAP + 64];
-    file_hex_encode(entry->name, name, sizeof(name));
-    snprintf(request, sizeof(request), "SHARE %s %" PRIu64 "\n", name, size);
-    enum request_result result = exchange_locked(client, request, "OK SHARED", REPLY_ERRORS);
-    if (result == REQUEST_OK) {
-        shared_index_mark(client->index, entry->name, true, size);
-        puts("OK SHARED");
-    } else if (result != REQUEST_FAILED && withdraw_locked(client, entry) == REQUEST_FAILED)
-        return REQUEST_FAILED;
+    uint64_t size;
+    int source = shared_file_open(entry->path, &size);
+    enum request_result result = REQUEST_REJECTED;
+    if (source < 0) {
+        fprintf(stderr, "Share %s remains pending: %s.\n", entry->name, strerror(errno));
+    } else {
+        close(source);
+        char request[FILE_NAME_TOKEN_CAP + 64];
+        snprintf(request, sizeof(request), "SHARE %s %" PRIu64 "\n", token, size);
+        result = exchange_locked(client, request, "OK SHARED", REPLY_ERRORS);
+        if (result == REQUEST_OK) {
+            shared_index_mark(client->index, entry->name, true, size);
+            puts("OK SHARED");
+            return REQUEST_OK;
+        }
+    }
+    if (result != REQUEST_FAILED && entry->announced) {
+        enum request_result removal = unshare_locked(client, token);
+        if (removal == REQUEST_FAILED)
+            return removal;
+        if (removal == REQUEST_OK)
+            puts("OK UNSHARED");
+    }
     return result;
 }
 
@@ -331,12 +357,9 @@ enum request_result client_unshare(ClientSession *client, const char *name)
     }
     pthread_mutex_lock(&client->mutex);
     enum request_result result = REQUEST_OK;
-    if (client->announced) {
-        char encoded[FILE_NAME_HEX_CAP], request[FILE_NAME_HEX_CAP + 16];
-        file_hex_encode(name, encoded, sizeof(encoded));
-        snprintf(request, sizeof(request), "UNSHARE %s\n", encoded);
-        result = exchange_locked(client, request, "OK UNSHARED", REPLY_ERRORS);
-    }
+    char token[FILE_NAME_TOKEN_CAP];
+    if (client->announced && protocol_encode_filename(name, token, sizeof(token)))
+        result = unshare_locked(client, token);
     if (result == REQUEST_OK) {
         if (shared_index_remove(client->index, name) != 0) {
             fprintf(stderr, "Cannot save share removal: %s. Retry unshare before hello/login.\n", strerror(errno));
@@ -363,15 +386,16 @@ static bool parse_result(char *line, size_t length, FileSearchResult *result)
     uint64_t id, port, size;
     struct in_addr address;
     if (!file_tokens(line, length, tokens, 6) || strcmp(tokens[0], "FILE") != 0 ||
-        !file_decimal(tokens[1], UINT32_MAX, &id) ||
-        strlen(tokens[2]) >= sizeof(result->ip) || inet_pton(AF_INET, tokens[2], &address) != 1 ||
-        !file_decimal(tokens[3], UINT16_MAX, &port) || port == 0 ||
-        !file_decimal(tokens[4], FILE_SIZE_MAX, &size) || !file_name_decode(tokens[5], result->name))
+        !protocol_decode_filename(tokens[1], result->name, sizeof(result->name)) ||
+        !protocol_parse_uint64(tokens[2], UINT64_MAX, &size) ||
+        !protocol_parse_uint64(tokens[3], UINT32_MAX, &id) ||
+        strlen(tokens[4]) >= sizeof(result->ip) || inet_pton(AF_INET, tokens[4], &address) != 1 ||
+        !protocol_parse_uint64(tokens[5], UINT16_MAX, &port) || port == 0)
         return false;
     result->client_id = (uint32_t)id;
     result->port = (uint16_t)port;
     result->size = size;
-    strcpy(result->ip, tokens[2]);
+    strcpy(result->ip, tokens[4]);
     return true;
 }
 
@@ -380,24 +404,19 @@ enum request_result client_search(ClientSession *client, const char *query)
     pthread_mutex_lock(&client->mutex);
     client->result_count = 0;
     enum request_result result = REQUEST_REJECTED;
-    char encoded[FILE_NAME_HEX_CAP];
-    if (query == NULL || !file_name_valid(query)) {
-        fputs("Invalid search query.\n", stderr);
+    char token[FILE_NAME_TOKEN_CAP];
+    if (!protocol_encode_filename(query, token, sizeof(token))) {
+        fputs("Invalid search filename. Use a printable ASCII basename.\n", stderr);
         goto unlock;
     }
     if (!client->announced) {
         fputs("Log in and announce the peer before searching.\n", stderr);
         goto unlock;
     }
-    file_hex_encode(query, encoded, sizeof(encoded));
-    char line[PROTOCOL_MAX_LINE + 1], request[FILE_NAME_HEX_CAP + 16];
-    snprintf(request, sizeof(request), "SEARCH %s\n", encoded);
-    if (client->failed || send_all(client->server.fd, request, strlen(request)) < 0) {
-        result = fail_locked(client);
-        goto unlock;
-    }
+    char line[PROTOCOL_MAX_LINE + 1], request[FILE_NAME_TOKEN_CAP + sizeof("SEARCH \n")];
+    snprintf(request, sizeof(request), "SEARCH %s\n", token);
     size_t length;
-    if (read_response_locked(client, line, &length) != NET_LINE_OK) {
+    if (!request_locked(client, request, line, &length)) {
         result = REQUEST_FAILED;
         goto unlock;
     }
@@ -408,7 +427,7 @@ enum request_result client_search(ClientSession *client, const char *query)
     char *tokens[3];
     uint64_t count;
     if (!file_tokens(line, length, tokens, 3) || strcmp(tokens[0], "OK") != 0 ||
-        strcmp(tokens[1], "RESULTS") != 0 || !file_decimal(tokens[2], FILE_ENTRY_LIMIT, &count)) {
+        strcmp(tokens[1], "RESULTS") != 0 || !protocol_parse_uint64(tokens[2], PROTOCOL_PEER_LIMIT, &count)) {
         result = fail_locked(client);
         goto unlock;
     }
@@ -418,17 +437,10 @@ enum request_result client_search(ClientSession *client, const char *query)
             result = REQUEST_FAILED;
             goto unlock;
         }
-        if (!parse_result(line, length, entry) || strstr(entry->name, query) == NULL) {
+        if (!parse_result(line, length, entry) || strcmp(entry->name, query) != 0 ||
+            (i != 0 && client->results[i - 1].client_id >= entry->client_id)) {
             result = fail_locked(client);
             goto unlock;
-        }
-        if (i != 0) {
-            FileSearchResult *previous = &client->results[i - 1];
-            int order = strcmp(previous->name, entry->name);
-            if (order > 0 || (order == 0 && previous->client_id >= entry->client_id)) {
-                result = fail_locked(client);
-                goto unlock;
-            }
         }
     }
     client->result_count = (size_t)count;
@@ -449,7 +461,7 @@ enum request_result client_download(ClientSession *client, const char *number)
     pthread_mutex_lock(&client->mutex);
     uint64_t selection;
     if (!client->announced || number == NULL ||
-        !file_decimal(number, client->result_count, &selection) || selection == 0) {
+        !protocol_parse_uint64(number, client->result_count, &selection) || selection == 0) {
         pthread_mutex_unlock(&client->mutex);
         fputs("Choose a valid result number from the latest search.\n", stderr);
         return REQUEST_REJECTED;
@@ -465,16 +477,19 @@ enum request_result client_download(ClientSession *client, const char *number)
         return REQUEST_FAILED;
     fprintf(stderr, "Download %s from client %" PRIu32 " at %s:%u failed: %s (%s).\n",
             entry.name, entry.client_id, entry.ip, (unsigned)entry.port, failure, strerror(errno));
-    if (strcmp(failure, "LOCAL_ERROR") == 0)
+    if (strcmp(failure, "LOCAL_ERROR") == 0 || entry.client_id == client->id)
         return REQUEST_REJECTED;
     pthread_mutex_lock(&client->mutex);
     enum request_result result = REQUEST_REJECTED;
     if (!client->failed && client->announced) {
-        char encoded[FILE_NAME_HEX_CAP], request[FILE_NAME_HEX_CAP + 100];
-        file_hex_encode(entry.name, encoded, sizeof(encoded));
-        snprintf(request, sizeof(request), "REPORT_FAIL %" PRIu32 " %s %s\n", entry.client_id, encoded, failure);
-        if (exchange_locked(client, request, "OK REPORTED", REPLY_ALL) == REQUEST_FAILED)
-            result = REQUEST_FAILED;
+        char token[FILE_NAME_TOKEN_CAP], request[FILE_NAME_TOKEN_CAP + 64];
+        if (protocol_encode_filename(entry.name, token, sizeof(token))) {
+            snprintf(request, sizeof(request), "REPORT %" PRIu32 " %s %s\n", entry.client_id, token, failure);
+            if (exchange_locked(client, request, "OK REPORTED", REPLY_ALL) == REQUEST_FAILED)
+                result = REQUEST_FAILED;
+        } else {
+            fputs("Cannot report the transfer failure: invalid filename.\n", stderr);
+        }
     } else {
         fputs("Cannot report the transfer failure: control session is unavailable.\n", stderr);
     }

@@ -44,12 +44,12 @@ enum request_result client_logout(ClientSession *client);
  * only an acknowledged SHARE enables serving. path may contain spaces.
  */
 enum request_result client_share(ClientSession *client, const char *path);
-/* Acknowledge server removal before persisting local removal. A failed local
- * save retains an inactive entry: retry unshare before hello/login/restart.
+/* Confirm a wire-valid name is absent on the active server session before
+ * saving local removal. A failed save retains an inactive entry for retry.
  */
 enum request_result client_unshare(ClientSession *client, const char *name);
-/* Clear the previous selection, validate the entire bounded response, then
- * publish numbered results. Invalid/truncated responses fail the connection.
+/* Clear the previous selection, search an exact filename, and publish numbered
+ * results after validation. Invalid/truncated responses fail the connection.
  */
 enum request_result client_search(ClientSession *client, const char *query);
 /* number selects the latest search. Report remote failures only; cancellation

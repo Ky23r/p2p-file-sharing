@@ -4,15 +4,16 @@ CFLAGS = -O2 -g -std=c11 -Wall -Wextra -Wpedantic -pthread
 LDFLAGS = -pthread
 LDLIBS = -lcrypto
 
-SERVER_SOURCES = src/server/server.c src/server/auth.c src/server/session.c src/common/net_io.c
+SERVER_SOURCES = src/server/server.c src/server/auth.c src/server/session.c src/server/service_log.c src/common/net_io.c src/common/protocol.c
 SERVER_OBJECTS = $(SERVER_SOURCES:src/%.c=build/%.o)
 CLIENT_SOURCES = src/client/client.c src/client/config.c src/client/peer_server.c \
                  src/client/file_protocol.c src/client/shared_index.c \
                  src/client/transfer.c src/client/client_session.c \
-                 src/client/client_signals.c src/common/net_io.c
+                 src/client/client_signals.c src/common/net_io.c src/common/protocol.c
 CLIENT_OBJECTS = $(CLIENT_SOURCES:src/%.c=build/%.o)
 NET_TEST = build/tests/test_net_io
 FILES_TEST = build/tests/test_files
+PROTOCOL_TEST = build/tests/test_protocol
 
 .PHONY: all clean test
 all: server client
@@ -31,15 +32,20 @@ $(NET_TEST): tests/server/test_net_io.c build/common/net_io.o include/net_io.h
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< build/common/net_io.o $(LDFLAGS) -o $@
 
-$(FILES_TEST): tests/client/test_files.c build/client/file_protocol.o build/client/shared_index.o build/client/peer_server.o build/client/transfer.o build/client/client_signals.o build/common/net_io.o
+$(FILES_TEST): tests/client/test_files.c build/client/file_protocol.o build/client/shared_index.o build/client/peer_server.o build/client/transfer.o build/client/client_signals.o build/common/net_io.o build/common/protocol.o
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) -Isrc/client $(CFLAGS) $^ $(LDFLAGS) $(LDLIBS) -o $@
 
-test: server client $(NET_TEST) $(FILES_TEST)
+$(PROTOCOL_TEST): tests/server/test_protocol.c build/common/protocol.o include/protocol.h
+	@mkdir -p $(@D)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< build/common/protocol.o $(LDFLAGS) -o $@
+
+test: server client $(NET_TEST) $(PROTOCOL_TEST) $(FILES_TEST)
 	./$(NET_TEST)
+	./$(PROTOCOL_TEST)
 	./$(FILES_TEST)
 	./server --help
-	python3 -m unittest discover -s tests/server -p 'test_server.py' -v
+	python3 -m unittest discover -s tests/server -p 'test_*.py' -v
 	python3 -m unittest discover -s tests/client -p 'test_*.py' -v
 
 clean:

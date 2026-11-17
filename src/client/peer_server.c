@@ -75,7 +75,7 @@ static void serve_file(int fd, SharedIndex *index)
         return;
     }
     char *tokens[2], name[FILE_NAME_CAP];
-    if (!file_tokens(line, length, tokens, 2) || !file_name_decode(tokens[1], name)) {
+    if (!file_tokens(line, length, tokens, 2) || !protocol_decode_filename(tokens[1], name, sizeof(name))) {
         peer_error(fd, "INVALID_REQUEST");
         return;
     }

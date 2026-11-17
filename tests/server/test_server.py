@@ -73,7 +73,7 @@ class Connection:
 
 
 class Server:
-    def __init__(self, directory, accounts=None, port=None, preexec_fn=None, defaults=False):
+    def __init__(self, directory, accounts=None, port=None, preexec_fn=None, defaults=False, log=None):
         self.port = available_port() if port is None else port
         self.accounts = Path(directory) / "accounts.db" if accounts is None else Path(accounts)
         self.stderr = tempfile.TemporaryFile()
@@ -82,6 +82,8 @@ class Server:
             command += ["--accounts", str(self.accounts)]
         else:
             self.accounts = Path(directory) / "data/server/accounts.db"
+        if log is not None:
+            command += ["--log", str(log)]
         self.process = subprocess.Popen(command, cwd=directory, stdin=subprocess.DEVNULL,
                                         stdout=subprocess.PIPE, stderr=self.stderr,
                                         preexec_fn=preexec_fn)

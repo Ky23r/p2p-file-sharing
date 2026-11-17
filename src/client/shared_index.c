@@ -34,8 +34,7 @@ int shared_file_open(const char *path, uint64_t *size)
     if (fd < 0)
         return -1;
     struct stat info;
-    if (fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_size >= 0 &&
-        (uint64_t)info.st_size <= FILE_SIZE_MAX) {
+    if (fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_size >= 0) {
         *size = (uint64_t)info.st_size;
         return fd;
     }
@@ -199,7 +198,8 @@ int shared_index_add(SharedIndex *index, const char *path, char name[FILE_NAME_C
     if (realpath(path, canonical) == NULL)
         return -1;
     const char *basename = strrchr(canonical, '/') + 1;
-    if (!valid_path(canonical) || !file_name_valid(basename)) {
+    char token[FILE_NAME_TOKEN_CAP];
+    if (!valid_path(canonical) || !protocol_encode_filename(basename, token, sizeof(token))) {
         errno = EINVAL;
         return -1;
     }

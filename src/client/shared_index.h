@@ -24,7 +24,7 @@ typedef struct SharedIndex SharedIndex;
 SharedIndex *shared_index_load(const char *path);
 /* Release the lock and state; NULL is safe. Does not delete persisted files. */
 void shared_index_destroy(SharedIndex *index);
-/* Canonicalize/read a regular file and atomically persist a new desired share.
+/* Open a canonical regular file with a wire-valid basename and atomically save it.
  * Returns 0 or -1/errno; name needs FILE_NAME_CAP bytes and is valid on success.
  * Same name/path is idempotent; a different path with that name gives EEXIST.
  */
@@ -41,8 +41,8 @@ void shared_index_set_online(SharedIndex *index, bool online);
  * Only set announced=true after the corresponding server acknowledgement.
  */
 void shared_index_mark(SharedIndex *index, const char *name, bool announced, uint64_t size);
-/* Open a regular source without following its final symlink, bound size, and
- * return caller-owned fd or -1/errno. size is valid only on success.
+/* Open a regular source without following its final symlink. Return caller-owned
+ * fd or -1/errno. size is valid only on success.
  */
 int shared_file_open(const char *path, uint64_t *size);
 /* Require online/announced state and unchanged advertised size. Authorization

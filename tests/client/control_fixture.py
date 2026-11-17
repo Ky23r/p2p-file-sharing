@@ -1,7 +1,12 @@
-"""Test-only implementation of the pending discovery contract in docs/PROTOCOL.md."""
+"""Controllable replies for client discovery and error-handling tests."""
 
 import socketserver
 import threading
+from urllib.parse import quote
+
+
+def filename_token(name):
+    return quote(name, safe="")
 
 
 class ControlFixture:
@@ -49,7 +54,7 @@ class ControlFixture:
                                 elif holder is not None and holder[0] is not self:
                                     response = b"ERR CLIENT_ID_IN_USE\n"
                                 else:
-                                    if candidate != identity:
+                                    if identity is None or candidate[0] != identity[0]:
                                         if identity is not None:
                                             fixture.peers.pop(identity[0], None)
                                         shares.clear()
@@ -64,29 +69,30 @@ class ControlFixture:
                                     identity, authenticated = None, False
                                     shares.clear()
                             elif identity is None:
-                                response = b"ERR PEER_REQUIRED\n"
+                                response = b"ERR HELLO_REQUIRED\n"
                             elif command == b"SHARE" and len(args) == 2:
                                 response = fixture.share_response
                                 if response == b"OK SHARED\n":
                                     shares[args[0]] = int(args[1])
                             elif command == b"UNSHARE" and len(args) == 1:
-                                shares.pop(args[0], None)
-                                response = b"OK UNSHARED\n"
+                                if args[0] in shares:
+                                    del shares[args[0]]
+                                    response = b"OK UNSHARED\n"
+                                else:
+                                    response = b"ERR FILE_NOT_FOUND\n"
                             elif command == b"SEARCH" and len(args) == 1:
                                 if fixture.search_response is not None:
                                     response = fixture.search_response
                                 else:
-                                    query = bytes.fromhex(args[0].decode())
+                                    name = args[0]
                                     rows = []
                                     for _, peer, files in fixture.peers.values():
-                                        for name, size in files.items():
-                                            if query in bytes.fromhex(name.decode()):
-                                                row = (f"FILE {peer[0]} {peer[1]} {peer[2]} {size} ".encode()
-                                                       + name + b"\n")
-                                                rows.append((bytes.fromhex(name.decode()), peer[0], row))
+                                        if name in files:
+                                            row = b"FILE " + name + f" {files[name]} {peer[0]} {peer[1]} {peer[2]}\n".encode()
+                                            rows.append((peer[0], row))
                                     rows.sort()
-                                    response = f"OK RESULTS {len(rows)}\n".encode() + b"".join(r[2] for r in rows)
-                            elif command == b"REPORT_FAIL" and len(args) == 3:
+                                    response = f"OK RESULTS {len(rows)}\n".encode() + b"".join(row for _, row in rows)
+                            elif command == b"REPORT" and len(args) == 3:
                                 fixture.reports.append(tuple(args))
                                 response = fixture.report_response
                         self.wfile.write(response)

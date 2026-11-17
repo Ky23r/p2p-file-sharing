@@ -1,123 +1,210 @@
 # TCP protocol
 
-## Implementation boundary
+The server handles accounts, peer announcements, shared-file discovery, and
+failed-download reports. The client manages the local catalog and transfers files
+directly between peers.
 
-The production server currently implements the account/session commands below.
-The client implements the file-discovery extension and the peer-transfer protocol.
-The extension is the integration contract for Member 1's remaining server work;
-`tests/client/control_fixture.py` is a test fixture, not a production server.
-Both members must review this contract before integrating the server extension.
+## Transport and framing
 
-## Common framing and values
+- IPv4 TCP, ASCII, case-sensitive commands, LF terminators only.
+- Each request and each response line has at most 4096 bytes excluding LF.
+- Exactly one ASCII space separates tokens. Leading/trailing spaces, repeated
+  spaces, CR/CRLF, tabs, NUL, non-ASCII bytes, and other control bytes are invalid.
+- Each request receives one response before the next response starts. `SEARCH`
+  has a counted multiline response; other commands have a single response line.
+- Fragmented TCP reads and multiple requests in one TCP write are supported.
+  A client must consume every search result before interpreting another response.
+- Invalid requests receive `ERR INVALID_REQUEST` and the connection remains open.
+  Requests exceeding the line limit receive `ERR LINE_TOO_LONG` and close.
+  EOF discards incomplete requests. Socket errors and inactivity timeouts close
+  without a guaranteed response. The server uses 30-second send/receive inactivity
+  timeouts; these do not bound the total lifetime of a slowly transmitted request.
+- `ERR SERVER_BUSY` closes the connection when connection/thread capacity is full.
+  A truncated search response must be discarded; EOF is never a result terminator.
 
-Control connections and peer connections use IPv4 TCP. Headers are printable
-ASCII with exactly one space between tokens, no leading/trailing spaces, and LF
-termination. CRLF, tabs, NUL, other control bytes, and non-ASCII header bytes are
-invalid. The maximum header is 4096 bytes excluding LF. Unknown error codes may
-be displayed but never interpreted as success. Decimal integers have no sign;
-leading zeros are accepted. Overflow is rejected before conversion.
+## Values
 
-File names are opaque filename bytes (normally UTF-8), encoded as lowercase hex
-on the wire. Decoded names contain 1..255 bytes, no NUL, ASCII control bytes,
-DEL, slash, or backslash, and cannot be `.` or `..`. This supports spaces and
-non-ASCII names without changing the ASCII framing. Names are case-sensitive.
-File sizes are decimal bytes from 0 through 1099511627776 (1 TiB). Local shares
-and a search response are each limited to 256 entries. Paths are local only and
-are never sent to another peer or the control server.
+| Value | Representation |
+| --- | --- |
+| Username | 3–32 ASCII letters, digits, or underscores; case-sensitive |
+| Password | 8–128 ASCII bytes from `!` through `~`; no spaces |
+| Client ID | Unsigned decimal, 0–4294967295 |
+| Peer port | Unsigned decimal, 1–65535 |
+| File size | Unsigned decimal, 0–18446744073709551615, in bytes |
+| Filename | Canonically encoded printable ASCII basename, described below |
+| Failure reason | `CONNECT_FAILED`, `NOT_FOUND`, `TIMEOUT`, `TRANSFER_FAILED`, or `SIZE_MISMATCH` |
 
-Each control request receives its entire response before another request starts.
-Clients serialize complete exchanges, including background HELLO requests.
-Socket inactivity timeouts are 30 seconds; these are not total-transfer deadlines.
-After a framing error, oversized line, truncated response, or transport failure,
-close the connection rather than attempting to resynchronize.
+Decimal inputs accept leading zeros and reject signs, missing digits, and
+overflow. Numeric output has no leading zeros except the value zero.
 
-## Existing account/session protocol
+### Filename encoding
 
-| Request | Success | State |
+A filename contains 1–255 decoded bytes from ASCII space through `~`. `/` and
+backslash are forbidden; `.` and `..` are forbidden as complete names. Names are
+case-sensitive. These are names advertised by peers, never server filesystem paths.
+
+ASCII letters, digits, `-`, `.`, `_`, and `~` appear literally. All other permitted
+bytes use `%HH` with uppercase hexadecimal digits. Encoding an unreserved byte,
+using lowercase hex, or using an invalid escape is rejected. This gives each name
+exactly one wire representation, at most 765 bytes long. For example:
+
+| Local name | Wire token |
+| --- | --- |
+| `notes.txt` | `notes.txt` |
+| `my notes.txt` | `my%20notes.txt` |
+| `100%.txt` | `100%25.txt` |
+| `a+b.txt` | `a%2Bb.txt` |
+
+`protocol_encode_filename`, `protocol_decode_filename`, and
+`protocol_parse_uint64` in `include/protocol.h` are shared helpers for clients.
+
+## Commands and session state
+
+| Request | Success | Required state |
 | --- | --- | --- |
 | `REGISTER <username> <password>` | `OK REGISTERED` | Logged out; remains logged out |
 | `LOGIN <username> <password>` | `OK LOGGED_IN` | Logged out; authenticates this TCP connection |
-| `HELLO <client_id> <port>` | `OK HELLO` | Requires login; announces a peer |
-| `LOGOUT` | `OK LOGGED_OUT` | Requires login; clears the session, keeps TCP open |
+| `HELLO <client_id> <port>` | `OK HELLO` | Logged in |
+| `LOGOUT` | `OK LOGGED_OUT` | Logged in; TCP remains open |
+| `SHARE <filename> <size>` | `OK SHARED` | Logged in and announced with `HELLO` |
+| `UNSHARE <filename>` | `OK UNSHARED` | Logged in and announced with `HELLO` |
+| `SEARCH <filename>` | Counted result response below | Logged in and announced with `HELLO` |
+| `REPORT <client_id> <filename> <reason>` | `OK REPORTED` | Logged in and announced with `HELLO` |
 
-Usernames contain 3..32 ASCII letters, digits, or underscores. Passwords contain
-8..128 bytes in 0x21..0x7e. Client IDs are uint32 values, including zero; ports
-are 1..65535. The server records the observed connection IP, not the ephemeral
-source port. One account may use multiple connections, with independent sessions.
-Only one active session may hold a given client ID. A failed HELLO preserves the
-previous registration. LOGIN alone does not register a peer; the CLI sends HELLO
-after login. LOGOUT/disconnect release the ID. Only accounts persist on the server.
+Syntax and value validation happen before state checks. File commands return
+`AUTH_REQUIRED` when logged out, then `HELLO_REQUIRED` when logged in but not
+announced. Unknown commands allow at most two arguments, preserving the original
+protocol; unknown commands with more arguments receive `INVALID_REQUEST`.
 
-Errors are `ERR <CODE>`. Existing codes are INVALID_REQUEST, UNKNOWN_COMMAND,
-AUTH_REQUIRED, ALREADY_AUTHENTICATED, USER_EXISTS, INVALID_CREDENTIALS,
-CLIENT_ID_IN_USE, LINE_TOO_LONG, SERVER_BUSY, and INTERNAL_ERROR. Syntax validation
-precedes authorization. Malformed requests may be followed by more requests;
-LINE_TOO_LONG and SERVER_BUSY close the connection. EOF discards unfinished
-requests. Transport inactivity closes the connection without a response.
+### Peer announcements and index lifetime
 
-The client silently repeats its successful HELLO every 10 seconds to preserve an
-idle authenticated connection, including during a long peer transfer. Repeating
-the same ID/port is idempotent and must preserve the session's shared-file index.
-A rejected background HELLO is reported on stderr and retains the previous
-announcement and future automatic retries. Transport errors, invalid responses,
-and the connection-closing SERVER_BUSY/LINE_TOO_LONG errors still disable serving.
+`HELLO` records the IP observed on the control connection and the announced port.
+An active client ID is unique across connections. One account may have multiple
+connections, each with its own peer identity and shares. A rejected `HELLO` leaves
+the previous identity, endpoint, and shares intact.
 
-## File-discovery extension (server implementation pending)
+Repeating the same ID preserves shares. Changing only the port updates the
+endpoint returned by future searches. Successfully changing the ID clears that
+connection's shares; the client must register them again under the new identity.
+Logout and disconnect atomically release the ID and remove all of that connection's
+shares. Accounts persist; peer information and shares do not survive a restart.
+After a new login, send `HELLO` and then register local shares again.
 
-All operations require LOGIN and a successful HELLO. Errors include AUTH_REQUIRED,
-PEER_REQUIRED, INVALID_REQUEST, NOT_SHARED, SHARE_LIMIT, RESULT_LIMIT, and
-INTERNAL_ERROR, using the existing error framing.
+### Shared-file registration and removal
 
-| Request | Success | Meaning |
-| --- | --- | --- |
-| `SHARE <name_hex> <size>` | `OK SHARED` | Add/update this session's file metadata |
-| `UNSHARE <name_hex>` | `OK UNSHARED` | Remove this session's file metadata |
-| `SEARCH <query_hex>` | `OK RESULTS <count>` followed by result rows | Find shares |
-| `REPORT_FAIL <client_id> <name_hex> <reason>` | `OK REPORTED` | Record a failed download |
+`SHARE` advertises a filename and size for the current connection. Registering an
+existing name updates its size, including when the connection already has 128
+distinct shares. Each connection can advertise at most 128 distinct names;
+another new name returns `SHARE_LIMIT`. Different peers can advertise the same
+name. Sizes are peer-supplied metadata; the server does not inspect file contents.
 
-SHARE is idempotent for the same name/size and updates size otherwise. File identity
-is `(client_id, name_bytes)`; different peers may share the same name with different
-contents. UNSHARE is idempotent, including an already absent name. The owner is the
-requesting session, never an ID supplied in a SHARE/UNSHARE request.
+`UNSHARE` removes only the requesting connection's advertisement. An unknown name,
+including a name held only by another peer, returns `FILE_NOT_FOUND`.
 
-SEARCH uses a nonempty filename query under the same encoding/limits as names.
-Match a case-sensitive byte substring. Include only currently announced shares,
-including the requester's own shares. Sort by decoded name bytes, then client ID.
-Zero results is `OK RESULTS 0` with no rows. If there are more than 256 matches,
-return `ERR RESULT_LIMIT` with no partial response. Each of exactly `count` rows is:
+### File search
+
+Search is an exact, case-sensitive filename match, with no wildcard or substring
+syntax. The response is:
 
 ```text
-FILE <client_id> <IPv4> <port> <size> <name_hex>\n
+OK RESULTS <count>
+FILE <filename> <size> <client_id> <IPv4> <port>
+... exactly count FILE lines ...
 ```
 
-Do not add a terminator after the rows. Repeated `(client_id, name)` rows, invalid
-fields, and counts over 256 are protocol errors. Clients select a numbered result;
-they do not use untrusted file names as destination paths.
+Results are a consistent snapshot sorted by numeric client ID, with at most 128
+records (one per active connection). They include the requester if it advertises
+that name. Zero matches is `OK RESULTS 0` followed by no result lines. There is no
+extra terminator. Peers may disconnect or change files after the snapshot.
 
-REPORT_FAIL reasons are CONNECT_FAILED, TIMEOUT, PEER_ERROR, INVALID_RESPONSE,
-SIZE_MISMATCH, and INTERRUPTED. Identify a result previously returned to the
-reporter's session. The server logs reporter, target, name, reason, and time;
-one unverified report must not remove another peer's shares. Local destination
-errors are shown locally and are not attributed to a remote peer. Reports receive
-normal error responses if unsupported or no longer applicable.
+Example (every line ends in LF):
 
-LOGOUT/disconnect remove all of the session's shares. Changing an existing HELLO
-ID or port clears that session's server shares; the client republishes its local
-shares after an explicit successful HELLO. Failed HELLO changes nothing. The
-client retains its local catalog across logout/restart and republishes readable
-files after each new login/HELLO. Missing files stay local but are not advertised.
-An explicit HELLO also withdraws previously announced files that can no longer be
-opened. A rejected reannouncement disables local serving and attempts to withdraw
-the previous advertisement. A rejected withdrawal is displayed; the server may
-retain stale metadata until session cleanup.
-Member 1 must extend the current two-argument request parser for REPORT_FAIL.
+```text
+SEARCH my%20notes.txt
+OK RESULTS 2
+FILE my%20notes.txt 2048 12 127.0.0.1 9001
+FILE my%20notes.txt 2048 34 127.0.0.1 9002
+```
+
+### Failed-download reports
+
+`REPORT` identifies the peer, filename, and failure reason. The target must still
+advertise the filename; otherwise the response is `FILE_NOT_FOUND`. Reporting
+one's own client ID returns `INVALID_REQUEST`. Reports are advisory and recorded
+in the service log. They do not remove advertisements or disconnect the target:
+a report is not proof that the target's file is unavailable. If a client ID has
+been released and reused, the report refers to the current advertisement only.
+
+```text
+REPORT 34 my%20notes.txt TIMEOUT
+OK REPORTED
+```
+
+## Errors
+
+All errors are one LF-terminated line, `ERR <ERROR_CODE>`.
+
+| Code | Meaning |
+| --- | --- |
+| `INVALID_REQUEST` | Invalid bytes, spacing, argument count/value, filename encoding, or self-report |
+| `UNKNOWN_COMMAND` | Unrecognized command in an otherwise valid request |
+| `AUTH_REQUIRED` | Operation requires login |
+| `HELLO_REQUIRED` | File operation requires a successful peer announcement |
+| `ALREADY_AUTHENTICATED` | `REGISTER` or `LOGIN` while logged in |
+| `USER_EXISTS` | Username already exists |
+| `INVALID_CREDENTIALS` | Unknown username or incorrect password |
+| `CLIENT_ID_IN_USE` | Another active connection holds the client ID |
+| `FILE_NOT_FOUND` | No advertisement owned by the relevant connection/target |
+| `SHARE_LIMIT` | Connection already advertises 128 distinct filenames |
+| `LINE_TOO_LONG` | Request exceeds 4096 bytes; connection closes |
+| `SERVER_BUSY` | Connection/thread capacity unavailable; connection closes |
+| `INTERNAL_ERROR` | Account storage, hashing, or allocation failure |
+
+## Service logging
+
+The default log is `<accounts-path>.log`; `--log PATH` overrides it. The server
+appends UTC timestamped connection, request/result, disconnect, and lifecycle
+events. Accepted file operations include encoded filenames; accepted reports also
+include target ID and reason. Passwords and raw malformed requests are never
+logged. File and session state share one mutex; log writes and socket writes
+happen outside that mutex.
+
+Log storage must be a regular file owned by the current user in a trusted parent
+directory; it is restricted to mode 0600. An unusable log fails startup. Runtime
+log write failures are best effort and do not change command results. Log data
+is append-only during normal operation; rotation is an operator responsibility.
+
+## Client integration
+
+The terminal client sends account and file commands, consumes complete counted
+search responses, and lets the user select a numbered peer. Search matches the
+complete, case-sensitive filename. Both control requests and peer GET requests
+reuse the canonical filename tokens and uint64 byte sizes above. The client uses
+the shared helpers in `include/protocol.h` for wire values.
+
+The client repeats an acknowledged HELLO every 10 seconds, including while
+terminal input is idle or a download is active. A rejected HELLO is displayed
+and preserves the previous announcement and automatic retries. Invalid framing,
+transport failure, SERVER_BUSY, and LINE_TOO_LONG disable new uploads and end
+the control session. Explicit successful HELLO republishes readable local shares.
+Missing or rejected files remain pending. Logout clears search results and serving
+state while retaining the desired catalog for the next login.
+
+Failed downloads use REPORT with the server's accepted reasons. A missing peer
+file maps to NOT_FOUND. Malformed replies, premature EOF, and other transfer
+failures map to TRANSFER_FAILED. Size and timeout failures retain their specific
+reasons. Local destination failures and requested cancellation are not reported.
+Reports about the client's own advertisement are skipped because the server
+rejects self-reports. Server rejections are displayed without destroying an
+otherwise usable control session.
 
 ## Peer transfer (Member 2)
 
-The downloader connects to the selected result's IPv4/port and sends:
+The downloader connects to the selected result's IPv4/port and sends this request
+using the canonical filename token:
 
 ```text
-GET <name_hex>\n
+GET <filename>\n
 ```
 
 The uploader accepts only a file in its local catalog that was successfully
@@ -170,13 +257,14 @@ signals pending after that teardown boundary use the previous dispositions.
 `--index PATH` defaults to `index.txt`; `--downloads DIRECTORY` defaults to `.`.
 Use a separate config, index, download directory, and peer port for each client.
 Catalog records are `name_hex<TAB>absolute_path_hex<LF>`, at most 256 records and
-4095 decoded path bytes. A separate `.lock` file prevents concurrent writers;
-atomic replacements persist a complete catalog. Invalid existing data fails
-startup unchanged. Local directories/configuration must be trusted.
+4095 decoded path bytes. A separate `.lock` file prevents concurrent writers.
+Atomic replacements persist a complete catalog. Invalid existing data fails
+startup unchanged. Previously saved non-ASCII basenames stay pending and can be
+removed with `unshare`. Local directories and configuration must be trusted.
 
-Commands are `share PATH`, `unshare NAME`, `shares`, `search QUERY`, and
-`download NUMBER`, in addition to existing account/session commands. PATH, NAME,
-and QUERY are the literal remainder of the input line, allowing embedded spaces.
+Commands are `share PATH`, `unshare NAME`, `shares`, `search NAME`, and
+`download NUMBER`, in addition to existing account/session commands. File command
+arguments use the literal remainder of the input line, allowing spaces.
 The share name is the path's basename. A name already mapped to another path must
 be unshared first. A local share may be saved before login; it remains pending
 until successfully announced. A rejected SHARE retains that pending local entry.
@@ -184,23 +272,24 @@ Explicit HELLO retries pending shares. Logout clears search results and serving
 state, while preserving the local catalog. Download numbers refer only to the
 latest completely validated search response and are cleared before a new search.
 
-SHARE persists local intent before sending to the server. UNSHARE first obtains
-the server acknowledgement, then disables serving and persists local removal.
+SHARE persists local intent before sending to the server. For an active session,
+the CLI treats either `OK UNSHARED` or `ERR FILE_NOT_FOUND` as confirmation that
+the file is absent on the server. It then disables serving and saves the removal.
 If that local save fails, retain an inactive pending entry, print the CLI-only
 `ERR LOCAL_STORAGE` status and a detailed error:
 retry `unshare` after fixing storage, before `hello`, login, or restart, because
 those operations can republish the retained entry. Catalog saves use fsync and
-atomic rename; directory-entry durability across a machine crash is not promised.
+atomic rename. A machine crash can still lose the updated directory entry.
 
 Examples (all arrows below represent complete LF-terminated headers):
 
 ```text
-Client -> server: SHARE 7265706f72742e706466 5
+Client -> server: SHARE report.pdf 5
 Server -> client: OK SHARED
-Client -> server: SEARCH 7265706f7274
+Client -> server: SEARCH report.pdf
 Server -> client: OK RESULTS 1
-Server -> client: FILE 12345 127.0.0.1 9001 5 7265706f72742e706466
-Downloader -> peer: GET 7265706f72742e706466
+Server -> client: FILE report.pdf 5 12345 127.0.0.1 9001
+Downloader -> peer: GET report.pdf
 Peer -> downloader: OK FILE 5
 Peer -> downloader: [five raw bytes, then EOF]
 ```

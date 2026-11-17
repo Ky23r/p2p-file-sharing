@@ -55,7 +55,7 @@ static void commands(void)
          "share PATH      Save and announce a local file (spaces allowed)\n"
          "unshare NAME    Stop sharing a filename\n"
          "shares          List local shares and announcement state\n"
-         "search QUERY    Find available peers by filename substring\n"
+         "search NAME     Find available peers by exact filename\n"
          "download NUMBER Download a result from the latest search\n"
          "help            Show commands\n"
          "quit            Close the connection and exit");

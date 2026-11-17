@@ -18,7 +18,7 @@
 int main(void)
 {
     char encoded[FILE_NAME_HEX_CAP], decoded[FILE_NAME_CAP];
-    const char *name = "b\xc3\xa1o c\xc3\xa1o.bin";
+    const char *name = "bao cao +%.bin";
     assert(file_hex_encode(name, encoded, sizeof(encoded)));
     assert(file_name_decode(encoded, decoded));
     assert(strcmp(name, decoded) == 0);
@@ -28,10 +28,6 @@ int main(void)
     assert(!file_name_decode("61FF", decoded));
     assert(!file_name_decode("1b", decoded));
     uint64_t number;
-    assert(file_decimal("1099511627776", FILE_SIZE_MAX, &number));
-    assert(number == FILE_SIZE_MAX);
-    assert(!file_decimal("1099511627777", FILE_SIZE_MAX, &number));
-    assert(!file_decimal("184467440737095516160", UINT64_MAX, &number));
 
     char directory[] = "/tmp/p2p-files-XXXXXX";
     assert(mkdtemp(directory) != NULL);
@@ -66,8 +62,7 @@ int main(void)
     assert(server != NULL);
     int peer = file_connect("127.0.0.1", ntohs(address.sin_port), NULL);
     assert(peer >= 0);
-    char request[FILE_NAME_HEX_CAP + 8];
-    snprintf(request, sizeof(request), "GET %s\n", encoded);
+    const char request[] = "GET bao%20cao%20%2B%25.bin\n";
     assert(send_all(peer, request, strlen(request)) == (ssize_t)strlen(request));
     net_reader reader;
     net_reader_init(&reader, peer);
@@ -89,7 +84,7 @@ int main(void)
     snprintf(destination, sizeof(destination), "%s/%s", downloads, name);
     assert(mkdir(downloads, 0700) == 0);
     FileSearchResult result = {.client_id = 7, .ip = "127.0.0.1",
-                          .port = ntohs(address.sin_port), .size = 4};
+                               .port = ntohs(address.sin_port), .size = 4};
     strcpy(result.name, name);
     assert(download_file(&result, downloads, NULL) == NULL);
     struct stat downloaded;

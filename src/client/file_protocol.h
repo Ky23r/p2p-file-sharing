@@ -5,12 +5,13 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "client_signals.h"
+#include "protocol.h"
 
-#define FILE_NAME_CAP 256U
+#define FILE_NAME_CAP (PROTOCOL_FILENAME_MAX + 1U)
 #define FILE_NAME_HEX_CAP (2U * FILE_NAME_CAP)
+#define FILE_NAME_TOKEN_CAP (PROTOCOL_FILENAME_TOKEN_MAX + 1U)
 #define FILE_PATH_CAP 4096U
 #define FILE_ENTRY_LIMIT 256U
-#define FILE_SIZE_MAX UINT64_C(1099511627776)
 #define FILE_TIMEOUT_SECONDS 30
 #define FILE_TRANSFER_BUFFER_SIZE 65536U
 
@@ -26,17 +27,17 @@ typedef struct {
  * pointers must be non-NULL. Outputs are usable only when true is returned.
  */
 
-/* Accept unsigned decimal through maximum, rejecting signs and overflow. */
-bool file_decimal(const char *text, uint64_t maximum, uint64_t *value);
-/* Encode bytes as lowercase hex; capacity includes the trailing NUL. */
+/* Local catalog encoding only; wire values use the shared protocol.h helpers.
+ * Encode bytes as lowercase hex; capacity includes the trailing NUL.
+ */
 bool file_hex_encode(const char *text, char *encoded, size_t capacity);
 /* Decode lowercase hex, rejecting malformed input and decoded NULs. capacity
  * includes NUL; failure may leave a partly written, unusable output buffer.
  */
 bool file_hex_decode(const char *encoded, char *text, size_t capacity);
-/* Validate the bounded basename rules in docs/PROTOCOL.md, without encoding. */
+/* Validate local catalog basenames, including legacy non-ASCII names. */
 bool file_name_valid(const char *name);
-/* Decode and validate a basename into FILE_NAME_CAP caller-owned bytes. */
+/* Decode a local catalog's hex basename into FILE_NAME_CAP caller-owned bytes. */
 bool file_name_decode(const char *encoded, char name[FILE_NAME_CAP]);
 /* line has length bytes plus trailing NUL; tokens has expected pointer slots.
  * Validate every raw byte/count, then replace single-space separators with NUL.

@@ -9,23 +9,6 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-bool file_decimal(const char *text, uint64_t maximum, uint64_t *value)
-{
-    uint64_t result = 0;
-    if (*text == '\0')
-        return false;
-    for (const unsigned char *p = (const unsigned char *)text; *p; ++p) {
-        if (*p < '0' || *p > '9')
-            return false;
-        unsigned digit = *p - '0';
-        if (result > maximum / 10 || (result == maximum / 10 && digit > maximum % 10))
-            return false;
-        result = result * 10 + digit;
-    }
-    *value = result;
-    return true;
-}
-
 bool file_hex_encode(const char *text, char *encoded, size_t capacity)
 {
     static const char digits[] = "0123456789abcdef";

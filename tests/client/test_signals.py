@@ -164,15 +164,14 @@ class ClientSignalTests(unittest.TestCase):
         peer = StalledPeer()
         self.addCleanup(peer.close)
         filename = "cancelled.bin"
-        encoded = filename.encode().hex()
         self.server.search_response = (
-            f"OK RESULTS 1\nFILE 90 127.0.0.1 {peer.port} 10 {encoded}\n".encode())
-        client.send("search cancelled")
+            f"OK RESULTS 1\nFILE {filename} 10 90 127.0.0.1 {peer.port}\n".encode())
+        client.send("search " + filename)
         client.expect(b"OK RESULTS 1\r\n")
         client.expect(b"p2p> ")
         client.send("download 1")
         self.assertTrue(peer.sent.wait(timeout=3), f"Peer never sent a partial body: {peer.error!r}")
-        self.assertEqual(peer.request, f"GET {encoded}\n".encode())
+        self.assertEqual(peer.request, f"GET {filename}\n".encode())
 
         deadline = time.monotonic() + 3
         while True:
