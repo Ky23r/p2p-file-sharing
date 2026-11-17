@@ -179,6 +179,30 @@ static void test_partial_send(void)
     close(fds[1]);
 }
 
+static void test_header_followed_by_binary_body(void)
+{
+    int fds[2];
+    net_reader reader;
+    char header[32];
+    size_t length;
+    unsigned char body[8];
+    const unsigned char wire[] = "OK FILE 5\n\0\nabc";
+    pair(fds);
+    net_reader_init(&reader, fds[1]);
+    assert(send_all(fds[0], wire, sizeof(wire) - 1) == (ssize_t)sizeof(wire) - 1);
+    assert(shutdown(fds[0], SHUT_WR) == 0);
+    assert(recv_line(&reader, header, sizeof(header), &length) == NET_LINE_OK);
+    assert(strcmp(header, "OK FILE 5") == 0);
+    assert(net_read(&reader, body, 2) == 2);
+    assert(net_read(&reader, body + 2, sizeof(body) - 2) == 3);
+    assert(memcmp(body, "\0\nabc", 5) == 0);
+    assert(net_read(&reader, body, sizeof(body)) == 0);
+    assert(net_read(&reader, NULL, 0) == 0);
+    assert(net_read(&reader, NULL, 1) == -1 && errno == EINVAL);
+    close(fds[0]);
+    close(fds[1]);
+}
+
 int main(void)
 {
     test_lines();
@@ -186,6 +210,7 @@ int main(void)
     test_errors();
     test_fragmentation_and_eintr();
     test_partial_send();
-    puts("net_io: 5 test groups passed (buffering, limits, errors, EINTR, partial sends)");
+    test_header_followed_by_binary_body();
+    puts("net_io: 6 test groups passed (buffering, limits, errors, EINTR, partial sends, binary body)");
     return 0;
 }

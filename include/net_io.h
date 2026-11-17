@@ -34,4 +34,10 @@ void net_reader_init(net_reader *reader, int fd);
  */
 int recv_line(net_reader *reader, char *line, size_t capacity, size_t *length);
 
+/* Read up to size binary bytes, consuming prefetched bytes first. Like recv:
+ * positive byte count, 0 at EOF (or size == 0), -1/errno on failure. Retry EINTR.
+ * Use the same reader for headers and bodies; never bypass its buffer.
+ */
+ssize_t net_read(net_reader *reader, void *buffer, size_t size);
+
 #endif
