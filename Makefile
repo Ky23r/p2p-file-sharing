@@ -6,7 +6,9 @@ LDLIBS = -lcrypto
 
 SERVER_SOURCES = src/server/server.c src/server/auth.c src/server/session.c src/common/net_io.c
 SERVER_OBJECTS = $(SERVER_SOURCES:src/%.c=build/%.o)
-CLIENT_SOURCES = src/client/client.c src/client/config.c src/client/peer_server.c src/client/file_protocol.c src/client/shared_index.c src/common/net_io.c
+CLIENT_SOURCES = src/client/client.c src/client/config.c src/client/peer_server.c \
+                 src/client/file_protocol.c src/client/shared_index.c \
+                 src/client/transfer.c src/common/net_io.c
 CLIENT_OBJECTS = $(CLIENT_SOURCES:src/%.c=build/%.o)
 NET_TEST = build/tests/test_net_io
 FILES_TEST = build/tests/test_files
@@ -28,9 +30,9 @@ $(NET_TEST): tests/server/test_net_io.c build/common/net_io.o include/net_io.h
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< build/common/net_io.o $(LDFLAGS) -o $@
 
-$(FILES_TEST): tests/client/test_files.c build/client/file_protocol.o build/client/shared_index.o build/client/peer_server.o build/common/net_io.o
+$(FILES_TEST): tests/client/test_files.c build/client/file_protocol.o build/client/shared_index.o build/client/peer_server.o build/client/transfer.o build/common/net_io.o
 	@mkdir -p $(@D)
-	$(CC) $(CPPFLAGS) -Isrc/client $(CFLAGS) $^ $(LDFLAGS) -o $@
+	$(CC) $(CPPFLAGS) -Isrc/client $(CFLAGS) $^ $(LDFLAGS) $(LDLIBS) -o $@
 
 test: server client $(NET_TEST) $(FILES_TEST)
 	./$(NET_TEST)

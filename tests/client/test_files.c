@@ -2,6 +2,7 @@
 #include "shared_index.h"
 #include "peer_server.h"
 #include "net_io.h"
+#include "transfer.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -12,6 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 
 int main(void)
 {
@@ -82,6 +84,25 @@ int main(void)
     assert(memcmp(body, "x\0\ny", 4) == 0);
     assert(net_read(&reader, body, sizeof(body)) == 0);
     close(peer);
+    char downloads[512], destination[1024];
+    snprintf(downloads, sizeof(downloads), "%s/downloads", directory);
+    snprintf(destination, sizeof(destination), "%s/%s", downloads, name);
+    assert(mkdir(downloads, 0700) == 0);
+    file_result result = {.client_id = 7, .ip = "127.0.0.1",
+                          .port = ntohs(address.sin_port), .size = 4};
+    strcpy(result.name, name);
+    assert(download_file(&result, downloads) == NULL);
+    struct stat downloaded;
+    assert(stat(destination, &downloaded) == 0 && (downloaded.st_mode & 0777) == 0600);
+    fd = open(destination, O_RDONLY);
+    assert(fd >= 0 && read(fd, body, sizeof(body)) == 4 && memcmp(body, "x\0\ny", 4) == 0);
+    close(fd);
+    assert(strcmp(download_file(&result, downloads), "LOCAL_ERROR") == 0 && errno == EEXIST);
+    assert(unlink(destination) == 0);
+    result.size = 3;
+    assert(strcmp(download_file(&result, downloads), "SIZE_MISMATCH") == 0);
+    assert(access(destination, F_OK) < 0 && errno == ENOENT);
+    assert(rmdir(downloads) == 0); /* No partial temporary download remains. */
     peer = file_connect("127.0.0.1", ntohs(address.sin_port));
     assert(peer >= 0); /* Stop must also interrupt a stalled request. */
     peer_server_stop(server);
