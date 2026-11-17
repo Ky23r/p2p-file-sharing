@@ -1,9 +1,36 @@
 #include "peer_server.h"
+#include "net_io.h"
+#include "protocol.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <inttypes.h>
 #include <netinet/in.h>
+#include <poll.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#define UPLOAD_WORKERS 4U
+
+typedef struct {
+    struct peer_server *server;
+    pthread_t thread;
+    int fd;
+} upload_worker;
+
+struct peer_server {
+    int listener;
+    int stop[2];
+    pthread_mutex_t mutex;
+    bool stopping;
+    size_t started;
+    shared_index *index;
+    upload_worker workers[UPLOAD_WORKERS];
+};
 
 int open_peer_listener(uint16_t port)
 {
@@ -26,4 +53,155 @@ int open_peer_listener(uint16_t port)
     close(fd);
     errno = error;
     return -1;
+}
+
+static void peer_error(int fd, const char *code)
+{
+    char response[80];
+    int length = snprintf(response, sizeof(response), "ERR %s\n", code);
+    (void)send_all(fd, response, (size_t)length);
+}
+
+static void serve_file(int fd, shared_index *index)
+{
+    net_reader reader;
+    net_reader_init(&reader, fd);
+    char line[PROTOCOL_MAX_LINE + 1];
+    size_t length;
+    int received = recv_line(&reader, line, sizeof(line), &length);
+    if (received != NET_LINE_OK) {
+        if (received == NET_LINE_TOO_LONG)
+            peer_error(fd, "LINE_TOO_LONG");
+        return;
+    }
+    char *tokens[2], name[FILE_NAME_CAP];
+    if (!file_tokens(line, length, tokens, 2) || !file_name_decode(tokens[1], name)) {
+        peer_error(fd, "INVALID_REQUEST");
+        return;
+    }
+    if (strcmp(tokens[0], "GET") != 0) {
+        peer_error(fd, "UNKNOWN_COMMAND");
+        return;
+    }
+    uint64_t size;
+    int source = shared_index_open(index, name, &size);
+    if (source < 0) {
+        peer_error(fd, errno == EACCES ? "NOT_SHARED" : errno == ESTALE ? "FILE_CHANGED" : "FILE_UNAVAILABLE");
+        return;
+    }
+    char header[64];
+    int count = snprintf(header, sizeof(header), "OK FILE %" PRIu64 "\n", size);
+    if (send_all(fd, header, (size_t)count) >= 0) {
+        unsigned char buffer[65536];
+        uint64_t remaining = size;
+        while (remaining != 0) {
+            size_t amount = remaining < sizeof(buffer) ? (size_t)remaining : sizeof(buffer);
+            ssize_t bytes = read(source, buffer, amount);
+            if (bytes < 0 && errno == EINTR)
+                continue;
+            if (bytes <= 0 || send_all(fd, buffer, (size_t)bytes) < 0)
+                break;
+            remaining -= (uint64_t)bytes;
+        }
+    }
+    close(source);
+}
+
+static void *upload_loop(void *argument)
+{
+    upload_worker *worker = argument;
+    peer_server *server = worker->server;
+    struct pollfd descriptors[2] = {
+        {server->listener, POLLIN, 0}, {server->stop[0], POLLIN, 0}
+    };
+    for (;;) {
+        int ready = poll(descriptors, 2, -1);
+        if (ready < 0 && errno == EINTR)
+            continue;
+        if (ready < 0 || descriptors[1].revents != 0 ||
+            (descriptors[0].revents & (POLLERR | POLLHUP | POLLNVAL)))
+            break;
+        int fd = accept(server->listener, NULL, NULL);
+        if (fd < 0)
+            continue; /* Another worker can win the nonblocking accept. */
+        pthread_mutex_lock(&server->mutex);
+        if (server->stopping) {
+            close(fd);
+            pthread_mutex_unlock(&server->mutex);
+            break;
+        }
+        worker->fd = fd;
+        pthread_mutex_unlock(&server->mutex);
+        if (fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 && file_socket_timeout(fd) == 0)
+            serve_file(fd, server->index);
+        pthread_mutex_lock(&server->mutex);
+        close(fd);
+        worker->fd = -1;
+        pthread_mutex_unlock(&server->mutex);
+    }
+    return NULL;
+}
+
+peer_server *peer_server_start(int listener, shared_index *index)
+{
+    peer_server *server = calloc(1, sizeof(*server));
+    if (server == NULL)
+        return NULL;
+    server->listener = listener;
+    server->index = index;
+    int error = pthread_mutex_init(&server->mutex, NULL);
+    if (error != 0) {
+        free(server);
+        errno = error;
+        return NULL;
+    }
+    int flags = fcntl(listener, F_GETFL);
+    if (flags < 0 || fcntl(listener, F_SETFL, flags | O_NONBLOCK) != 0 || pipe(server->stop) != 0) {
+        error = errno;
+        pthread_mutex_destroy(&server->mutex);
+        free(server);
+        errno = error;
+        return NULL;
+    }
+    if (fcntl(server->stop[0], F_SETFD, FD_CLOEXEC) < 0 || fcntl(server->stop[1], F_SETFD, FD_CLOEXEC) < 0) {
+        error = errno;
+        peer_server_stop(server);
+        errno = error;
+        return NULL;
+    }
+    for (size_t i = 0; i < UPLOAD_WORKERS; ++i) {
+        server->workers[i].server = server;
+        server->workers[i].fd = -1;
+        error = pthread_create(&server->workers[i].thread, NULL, upload_loop, &server->workers[i]);
+        if (error != 0) {
+            peer_server_stop(server);
+            errno = error;
+            return NULL;
+        }
+        server->started++;
+    }
+    return server;
+}
+
+void peer_server_stop(peer_server *server)
+{
+    if (server == NULL)
+        return;
+    pthread_mutex_lock(&server->mutex);
+    server->stopping = true;
+    for (size_t i = 0; i < server->started; ++i)
+        if (server->workers[i].fd >= 0)
+            shutdown(server->workers[i].fd, SHUT_RDWR);
+    pthread_mutex_unlock(&server->mutex);
+    char stop = 1;
+    ssize_t written;
+    do {
+        written = write(server->stop[1], &stop, 1);
+    } while (written < 0 && errno == EINTR);
+    for (size_t i = 0; i < server->started; ++i)
+        pthread_join(server->workers[i].thread, NULL);
+    close(server->stop[0]);
+    close(server->stop[1]);
+    pthread_mutex_destroy(&server->mutex);
+    free(server);
 }

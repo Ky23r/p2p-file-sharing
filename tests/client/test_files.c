@@ -1,13 +1,17 @@
 #include "file_protocol.h"
 #include "shared_index.h"
+#include "peer_server.h"
+#include "net_io.h"
 
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/socket.h>
 
 int main(void)
 {
@@ -51,6 +55,38 @@ int main(void)
     fd = shared_index_open(index, name, &number);
     assert(fd >= 0 && number == 4);
     close(fd);
+    int listener = open_peer_listener(0);
+    assert(listener >= 0);
+    struct sockaddr_in address;
+    socklen_t address_size = sizeof(address);
+    assert(getsockname(listener, (struct sockaddr *)&address, &address_size) == 0);
+    peer_server *server = peer_server_start(listener, index);
+    assert(server != NULL);
+    int peer = file_connect("127.0.0.1", ntohs(address.sin_port));
+    assert(peer >= 0);
+    char request[FILE_NAME_HEX_CAP + 8];
+    snprintf(request, sizeof(request), "GET %s\n", encoded);
+    assert(send_all(peer, request, strlen(request)) == (ssize_t)strlen(request));
+    net_reader reader;
+    net_reader_init(&reader, peer);
+    char response[64], body[4];
+    size_t header_length;
+    assert(recv_line(&reader, response, sizeof(response), &header_length) == NET_LINE_OK);
+    assert(strcmp(response, "OK FILE 4") == 0);
+    size_t received = 0;
+    while (received < sizeof(body)) {
+        ssize_t count = net_read(&reader, body + received, sizeof(body) - received);
+        assert(count > 0);
+        received += (size_t)count;
+    }
+    assert(memcmp(body, "x\0\ny", 4) == 0);
+    assert(net_read(&reader, body, sizeof(body)) == 0);
+    close(peer);
+    peer = file_connect("127.0.0.1", ntohs(address.sin_port));
+    assert(peer >= 0); /* Stop must also interrupt a stalled request. */
+    peer_server_stop(server);
+    close(peer);
+    close(listener);
     shared_index_set_online(index, false);
     assert(shared_index_open(index, name, &number) < 0);
     shared_index_destroy(index);

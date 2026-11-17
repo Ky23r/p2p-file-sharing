@@ -28,7 +28,7 @@ $(NET_TEST): tests/server/test_net_io.c build/common/net_io.o include/net_io.h
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< build/common/net_io.o $(LDFLAGS) -o $@
 
-$(FILES_TEST): tests/client/test_files.c build/client/file_protocol.o build/client/shared_index.o
+$(FILES_TEST): tests/client/test_files.c build/client/file_protocol.o build/client/shared_index.o build/client/peer_server.o build/common/net_io.o
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) -Isrc/client $(CFLAGS) $^ $(LDFLAGS) -o $@
 
