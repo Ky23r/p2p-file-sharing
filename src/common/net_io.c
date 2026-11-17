@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <string.h>
 #include <sys/socket.h>
 
 ssize_t send_all(int fd, const void *buffer, size_t size)
@@ -34,6 +35,28 @@ void net_reader_init(net_reader *reader, int fd)
     reader->fd = fd;
     reader->next = 0;
     reader->used = 0;
+}
+
+ssize_t net_read(net_reader *reader, void *buffer, size_t size)
+{
+    if (reader == NULL || size > (size_t)SSIZE_MAX || (size != 0 && buffer == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (size == 0)
+        return 0;
+    size_t available = reader->used - reader->next;
+    if (available != 0) {
+        size_t count = available < size ? available : size;
+        memcpy(buffer, reader->buffer + reader->next, count);
+        reader->next += count;
+        return (ssize_t)count;
+    }
+    ssize_t count;
+    do {
+        count = recv(reader->fd, buffer, size, 0);
+    } while (count < 0 && errno == EINTR);
+    return count;
 }
 
 int recv_line(net_reader *reader, char *line, size_t capacity, size_t *length)

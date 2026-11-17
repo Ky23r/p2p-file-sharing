@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SESSION_LIMIT 128U
+#define SESSION_LIMIT PROTOCOL_PEER_LIMIT
 
 typedef struct shared_file shared_file;
 

@@ -1,5 +1,5 @@
 #include "config.h"
-#include "net_io.h"
+#include "client_session.h"
 #include "peer_server.h"
 #include "protocol.h"
 
@@ -7,60 +7,39 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <openssl/crypto.h>
-#include <signal.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <termios.h>
 #include <unistd.h>
 
 #define DEFAULT_CONFIG "config.txt"
 #define DEFAULT_PEER_PORT 9001U
-#define SOCKET_TIMEOUT_SECONDS 30
 
 typedef struct {
     const char *ip;
     const char *config;
+    const char *index;
+    const char *downloads;
     uint16_t server_port;
     uint16_t peer_port;
 } client_options;
 
-enum request_result { REQUEST_FAILED = -1, REQUEST_REJECTED, REQUEST_OK };
 enum input_result { INPUT_END, INPUT_ERROR, INPUT_INVALID, INPUT_OK };
 
-/* The saved settings are available to the signal handler during password entry. */
-static struct termios terminal_settings;
-static volatile sig_atomic_t password_entry;
-
-static void restore_terminal_on_signal(int number)
-{
-    if (password_entry) {
-        tcflush(STDIN_FILENO, TCIFLUSH);
-        tcsetattr(STDIN_FILENO, TCSANOW, &terminal_settings);
-    }
-    _exit(128 + number);
-}
-
-static int install_terminal_handlers(void)
-{
-    const int signals[] = {SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGPIPE};
-    struct sigaction action = {0};
-    action.sa_handler = restore_terminal_on_signal;
-    sigfillset(&action.sa_mask);
-    for (size_t i = 0; i < sizeof(signals) / sizeof(signals[0]); ++i) {
-        if (sigaction(signals[i], &action, NULL) < 0)
-            return -1;
-    }
-    return 0;
-}
+typedef struct {
+    int control_failure_fd;
+    ClientSignals *signals;
+} InputContext;
 
 static void usage(FILE *stream, const char *program)
 {
     fprintf(stream, "Usage: %s [--server IPv4] [--port 1..65535]\n"
                     "       [--peer-port 1..65535] [--config PATH]\n"
+                    "       [--index PATH] [--downloads DIRECTORY]\n"
                     "       %s --help\n"
                     "Defaults: server %s:%u, peer port %u, config %s\n",
             program, program, DEFAULT_SERVER_IP, DEFAULT_SERVER_PORT,
@@ -73,6 +52,11 @@ static void commands(void)
          "login USER      Log in and announce the peer port\n"
          "hello           Announce the client ID and peer port again\n"
          "logout          Log out and keep the connection open\n"
+         "share PATH      Save and announce a local file (spaces allowed)\n"
+         "unshare NAME    Stop sharing a filename\n"
+         "shares          List local shares and announcement state\n"
+         "search NAME     Find available peers by exact filename\n"
+         "download NUMBER Download a result from the latest search\n"
          "help            Show commands\n"
          "quit            Close the connection and exit");
 }
@@ -100,6 +84,10 @@ static bool parse_options(int argc, char **argv, client_options *options)
             options->ip = value;
         else if (strcmp(option, "--config") == 0)
             options->config = value;
+        else if (strcmp(option, "--index") == 0)
+            options->index = value;
+        else if (strcmp(option, "--downloads") == 0)
+            options->downloads = value;
         else if (strcmp(option, "--port") == 0) {
             if (!parse_port(value, &options->server_port))
                 return false;
@@ -113,71 +101,38 @@ static bool parse_options(int argc, char **argv, client_options *options)
     return true;
 }
 
-static int connect_server(const struct sockaddr_in *address)
-{
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0)
-        return -1;
-
-    const struct timeval timeout = {SOCKET_TIMEOUT_SECONDS, 0};
-    if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0 &&
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0 &&
-        connect(fd, (const struct sockaddr *)address, sizeof(*address)) == 0)
-        return fd;
-
-    int error = errno;
-    close(fd);
-    errno = error == EINPROGRESS ? ETIMEDOUT : error;
-    return -1;
-}
-
-static enum request_result exchange(net_reader *server, const char *request,
-                                    const char *expected)
-{
-    if (send_all(server->fd, request, strlen(request)) < 0) {
-        perror("Sending request to server");
-        return REQUEST_FAILED;
-    }
-
-    char response[PROTOCOL_MAX_LINE + 1];
-    size_t length;
-    int result = recv_line(server, response, sizeof(response), &length);
-    if (result == NET_LINE_ERROR) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
-            fputs("Timed out waiting for the server.\n", stderr);
-        else
-            perror("Reading response from server");
-    } else if (result == NET_LINE_EOF) {
-        fputs("Server closed the connection.\n", stderr);
-    } else if (result == NET_LINE_OK && length == strlen(expected) &&
-               memcmp(response, expected, length) == 0) {
-        puts(response);
-        return REQUEST_OK;
-    } else if (result == NET_LINE_OK && length > 4 && memcmp(response, "ERR ", 4) == 0 &&
-               strspn(response + 4, "ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789") == length - 4) {
-        puts(response);
-        if (strcmp(response, "ERR SERVER_BUSY") != 0 && strcmp(response, "ERR LINE_TOO_LONG") != 0)
-            return REQUEST_REJECTED;
-    } else {
-        fputs("Invalid response from server.\n", stderr);
-    }
-    return REQUEST_FAILED;
-}
-
-static enum request_result announce_peer(net_reader *server, uint32_t id, uint16_t port)
-{
-    char request[sizeof("HELLO 4294967295 65535\n")];
-    snprintf(request, sizeof(request), "HELLO %" PRIu32 " %u\n", id, (unsigned)port);
-    return exchange(server, request, "OK HELLO");
-}
-
 /* Drain excess bytes before reading the next line. */
-static enum input_result read_input(char *line, size_t capacity)
+static enum input_result read_input(char *line, size_t capacity, const InputContext *input)
 {
     size_t length = 0;
     bool invalid = false;
     int byte;
-    while ((byte = getchar()) != '\n' && byte != EOF) {
+    for (;;) {
+        struct pollfd descriptors[3] = {
+            {STDIN_FILENO, POLLIN, 0}, {input->control_failure_fd, POLLIN, 0},
+            {client_signals_fd(input->signals), POLLIN, 0}
+        };
+        int ready;
+        do {
+            ready = poll(descriptors, 3, -1);
+        } while (ready < 0 && errno == EINTR);
+        if (ready < 0)
+            return INPUT_ERROR;
+        if (descriptors[2].revents != 0) {
+            errno = ECANCELED;
+            return INPUT_ERROR;
+        }
+        if (descriptors[1].revents != 0) {
+            errno = ECONNRESET;
+            return INPUT_ERROR;
+        }
+        if (descriptors[0].revents & POLLNVAL) {
+            errno = EBADF;
+            return INPUT_ERROR;
+        }
+        byte = getchar();
+        if (byte == '\n' || byte == EOF)
+            break;
         if (byte == '\0' || length == capacity - 1)
             invalid = true;
         else
@@ -215,46 +170,52 @@ static bool valid_password(const char *password)
     return true;
 }
 
-static enum input_result read_password(char *password, size_t capacity, bool interactive)
+static enum input_result read_password(char *password, size_t capacity, bool interactive,
+                                       const InputContext *input)
 {
     if (!interactive)
-        return read_input(password, capacity);
+        return read_input(password, capacity, input);
 
+    struct termios terminal_settings;
     if (tcgetattr(STDIN_FILENO, &terminal_settings) < 0)
         return INPUT_ERROR;
     struct termios hidden = terminal_settings;
     hidden.c_lflag &= ~(ECHO | ECHONL);
-    password_entry = 1;
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &hidden) < 0) {
-        password_entry = 0;
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &hidden) < 0)
         return INPUT_ERROR;
-    }
 
     fputs("Password: ", stdout);
     fflush(stdout);
-    enum input_result result = read_input(password, capacity);
+    enum input_result result = read_input(password, capacity, input);
     int error = errno;
-    if (tcsetattr(STDIN_FILENO, TCSANOW, &terminal_settings) < 0)
+    /* Discard a partly entered password before restoring terminal echo. */
+    if (client_signals_number(input->signals) != 0)
+        tcflush(STDIN_FILENO, TCIFLUSH);
+    int restored;
+    do {
+        restored = tcsetattr(STDIN_FILENO, TCSANOW, &terminal_settings);
+    } while (restored < 0 && errno == EINTR);
+    if (restored < 0)
         return INPUT_ERROR;
-    password_entry = 0;
     putchar('\n');
     errno = error;
     return result;
 }
 
-static enum request_result account_command(net_reader *server, bool registering,
-                                           const char *username, bool interactive)
+static enum request_result account_command(ClientSession *server, bool registering,
+                                           const char *username, bool interactive, const InputContext *context)
 {
     bool username_valid = valid_username(username);
     char password[PASSWORD_MAX + 2];
     enum input_result input = INPUT_INVALID;
     /* Scripted account commands with a username carry a separate password line. */
     if (username_valid || (!interactive && username != NULL))
-        input = read_password(password, sizeof(password), interactive);
+        input = read_password(password, sizeof(password), interactive, context);
     if (input != INPUT_OK || !username_valid || !valid_password(password)) {
         OPENSSL_cleanse(password, sizeof(password));
         if (input == INPUT_ERROR) {
-            perror("Reading password");
+            if (client_signals_number(context->signals) == 0)
+                perror("Reading password");
             return REQUEST_FAILED;
         }
         if (input == INPUT_END) {
@@ -274,19 +235,16 @@ static enum request_result account_command(net_reader *server, bool registering,
     snprintf(request, sizeof(request), "%s %s %s\n", registering ? "REGISTER" : "LOGIN",
              username, password);
     OPENSSL_cleanse(password, sizeof(password));
-    enum request_result result = exchange(server, request, registering ? "OK REGISTERED" : "OK LOGGED_IN");
+    enum request_result result = client_exchange(server, request, registering ? "OK REGISTERED" : "OK LOGGED_IN");
     OPENSSL_cleanse(request, sizeof(request));
     return result;
 }
 
-static int run_client(net_reader *server, uint32_t id, uint16_t peer_port)
+static int run_client(ClientSession *server, uint32_t id, uint16_t peer_port, ClientSignals *signals)
 {
     bool interactive = isatty(STDIN_FILENO);
+    InputContext input_context = {client_session_failure_fd(server), signals};
     if (interactive) {
-        if (install_terminal_handlers() < 0) {
-            perror("Preparing terminal");
-            return EXIT_FAILURE;
-        }
         printf("Connected with client ID %" PRIu32 ". Peer listener on port %u.\n"
                "Type 'help' for commands.\n", id, (unsigned)peer_port);
     }
@@ -296,12 +254,13 @@ static int run_client(net_reader *server, uint32_t id, uint16_t peer_port)
             fputs("p2p> ", stdout);
             fflush(stdout);
         }
-        char line[PROTOCOL_MAX_LINE + 1];
-        enum input_result input = read_input(line, sizeof(line));
+        char line[FILE_PATH_CAP + 32];
+        enum input_result input = read_input(line, sizeof(line), &input_context);
         if (input == INPUT_END)
-            return EXIT_SUCCESS;
+            return client_session_failed(server) ? EXIT_FAILURE : EXIT_SUCCESS;
         if (input == INPUT_ERROR) {
-            perror("Reading command");
+            if (client_signals_number(signals) == 0)
+                perror("Reading command");
             return EXIT_FAILURE;
         }
         if (input == INPUT_INVALID) {
@@ -310,6 +269,8 @@ static int run_client(net_reader *server, uint32_t id, uint16_t peer_port)
         }
         if (*line == '\0')
             continue;
+        if (client_session_failed(server))
+            return EXIT_FAILURE;
 
         char *argument = strchr(line, ' ');
         if (argument != NULL) {
@@ -319,15 +280,25 @@ static int run_client(net_reader *server, uint32_t id, uint16_t peer_port)
         bool registering = strcmp(line, "register") == 0;
         enum request_result result = REQUEST_REJECTED;
         if (registering || strcmp(line, "login") == 0) {
-            result = account_command(server, registering, argument, interactive);
+            result = account_command(server, registering, argument, interactive, &input_context);
             if (!registering && result == REQUEST_OK)
-                result = announce_peer(server, id, peer_port);
+                result = client_hello(server);
+        } else if (strcmp(line, "share") == 0) {
+            result = client_share(server, argument);
+        } else if (strcmp(line, "unshare") == 0) {
+            result = client_unshare(server, argument);
+        } else if (strcmp(line, "search") == 0) {
+            result = client_search(server, argument);
+        } else if (strcmp(line, "download") == 0) {
+            result = client_download(server, argument);
         } else if (argument != NULL) {
             fputs("Unexpected argument. Type 'help' for commands.\n", stderr);
         } else if (strcmp(line, "hello") == 0) {
-            result = announce_peer(server, id, peer_port);
+            result = client_hello(server);
         } else if (strcmp(line, "logout") == 0) {
-            result = exchange(server, "LOGOUT\n", "OK LOGGED_OUT");
+            result = client_logout(server);
+        } else if (strcmp(line, "shares") == 0) {
+            client_shares(server);
         } else if (strcmp(line, "help") == 0) {
             commands();
         } else if (strcmp(line, "quit") == 0) {
@@ -342,7 +313,8 @@ static int run_client(net_reader *server, uint32_t id, uint16_t peer_port)
 
 int main(int argc, char **argv)
 {
-    client_options options = {DEFAULT_SERVER_IP, DEFAULT_CONFIG, DEFAULT_SERVER_PORT, DEFAULT_PEER_PORT};
+    client_options options = {DEFAULT_SERVER_IP, DEFAULT_CONFIG, "index.txt", ".",
+                              DEFAULT_SERVER_PORT, DEFAULT_PEER_PORT};
     if (argc == 2 && strcmp(argv[1], "--help") == 0) {
         usage(stdout, argv[0]);
         commands();
@@ -361,31 +333,62 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    ClientSignals *signals = client_signals_start();
+    if (signals == NULL) {
+        perror("Preparing client signals");
+        return EXIT_FAILURE;
+    }
+    int result = EXIT_FAILURE;
+    int peer_listener = -1, fd = -1;
+    SharedIndex *index = NULL;
+    PeerServer *peers = NULL;
+    ClientSession *server = NULL;
     uint32_t id;
     if (load_client_id(options.config, &id) != 0) {
         fprintf(stderr, "Client ID file %s: %s\n", options.config, strerror(errno));
-        return EXIT_FAILURE;
+        goto cleanup;
     }
-    int peer_listener = open_peer_listener(options.peer_port);
+    peer_listener = open_peer_listener(options.peer_port);
     if (peer_listener < 0) {
         fprintf(stderr, "Starting peer listener on port %u: %s\n",
                 (unsigned)options.peer_port, strerror(errno));
-        return EXIT_FAILURE;
+        goto cleanup;
     }
 
-    int fd = connect_server(&address);
+    index = shared_index_load(options.index);
+    if (index == NULL) {
+        fprintf(stderr, "Shared-file index %s: %s\n", options.index, strerror(errno));
+        goto cleanup;
+    }
+    peers = peer_server_start(peer_listener, index);
+    if (peers == NULL) {
+        perror("Starting peer workers");
+        goto cleanup;
+    }
+    fd = file_connect(options.ip, options.server_port, signals);
     if (fd < 0) {
         fprintf(stderr, "Connecting to %s:%u: %s\n", options.ip,
                 (unsigned)options.server_port, strerror(errno));
-        close(peer_listener);
-        return EXIT_FAILURE;
+        goto cleanup;
     }
 
     setvbuf(stdout, NULL, _IOLBF, 0);
-    net_reader server;
-    net_reader_init(&server, fd);
-    int result = run_client(&server, id, options.peer_port);
-    close(fd);
-    close(peer_listener);
+    /* Input polling must see every byte, including redirected multi-line input. */
+    setvbuf(stdin, NULL, _IONBF, 0);
+    server = client_session_start(fd, id, options.peer_port, index, options.downloads, signals);
+    if (server == NULL)
+        perror("Starting control session");
+    else
+        result = run_client(server, id, options.peer_port, signals);
+cleanup:
+    client_session_stop(server);
+    client_signals_close_socket(signals, fd);
+    peer_server_stop(peers);
+    shared_index_destroy(index);
+    if (peer_listener >= 0)
+        close(peer_listener);
+    int number = client_signals_stop(signals);
+    if (number != 0)
+        return 128 + number;
     return result;
 }

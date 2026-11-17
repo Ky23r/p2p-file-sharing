@@ -3,6 +3,10 @@
 /client
 /config.txt
 /config.txt.tmp.*
+/index.txt
+/index.txt.lock
+/index.txt.tmp.*
+/.p2p-download-*
 /data/server/*
 !/data/server/.gitkeep
 __pycache__/

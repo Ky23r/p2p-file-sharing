@@ -3,9 +3,9 @@
 C11 project targeting Ubuntu 20.04, GCC, POSIX TCP sockets, and pthreads.
 The centralized control server provides accounts, connection-local sessions,
 peer announcements, shared-file registration/removal, exact filename searching,
-failed-download reports, and service logging. The terminal client currently
-sends account commands and announces its persistent peer identity; client file
-commands and direct P2P transfer remain to be implemented by Member 2.
+failed-download reports, and service logging. The terminal client manages a
+persistent local share catalog, searches the server, and transfers files directly
+between peers.
 
 Install `build-essential libssl-dev python3`, then run:
 
@@ -48,6 +48,11 @@ settings can also be supplied explicitly.
 | `login alice` | Prompt for a password, log in, and send `HELLO` |
 | `hello` | Send the client ID and peer port again on the current connection |
 | `logout` | End the session and release the client ID |
+| `share PATH` | Persist a local file and announce it when the peer is registered |
+| `unshare NAME` | Remove a share from the server and local catalog |
+| `shares` | List local files as `PENDING` or `ANNOUNCED` |
+| `search NAME` | Find an exact filename and display numbered peers |
+| `download NUMBER` | Download a result from the latest search |
 | `help` | Show commands |
 | `quit` | Close the connection and exit |
 
@@ -64,14 +69,47 @@ can retry the announcement.
 
 The client opens an IPv4 TCP listener on `--peer-port` (default `9001`) before
 connecting to the control server. `HELLO` announces that port after login.
-For multiple clients on the same machine, choose distinct peer ports and config
-files. File serving and direct downloads belong to the P2P transfer milestone.
+Four upload workers accept peer requests and serve files that have been announced
+successfully on the active control session. An idle authenticated client repeats
+HELLO every 10 seconds so the control connection survives the server's 30-second
+inactivity limit. Transport failures disable new uploads and end the CLI.
+
+`--index PATH` selects the local catalog (default `index.txt`), and `--downloads
+DIRECTORY` selects an existing trusted download directory (default `.`). Use
+distinct peer ports, config files, catalogs, and download directories for multiple
+clients. File arguments are the literal remainder of a command line, so spaces
+work without quotes. Shared filenames are printable ASCII basenames taken from
+the canonical source path.
+
+```sh
+./client --peer-port 9001 --config peer-a.txt --index shares-a.txt --downloads downloads-a
+./client --peer-port 9002 --config peer-b.txt --index shares-b.txt --downloads downloads-b
+```
+
+The directories must already exist. Use `share /path/to/report.pdf` on the sender,
+then `search report.pdf` and `download 1` on the receiver. Searches match the
+complete filename, including case. The test suite runs these workflows against
+the server and uses controlled replies for error and framing tests.
+
+Local shares survive logout/restart and are reannounced after login/HELLO. Missing
+or rejected files remain pending and cannot be served. `unshare` preserves the
+source file. An already opened upload may finish after unshare/logout. Downloads
+use bounded binary buffers, require exact size and clean EOF, and publish a
+mode-0600 completed file without overwriting an existing path. Failed transfers
+remove their temporary file and report the peer failure when control is available;
+local storage errors are not reported as peer failures. No resume or content hash
+is provided; shared sources must remain unchanged during transfer.
+
+Ctrl+C and SIGTERM cancel a pending download, remove its partial temporary file,
+restore terminal echo, and stop/join client workers before exiting with 130/143.
+Cancellation is local and is not reported as a failed peer. A successfully
+published complete file is retained.
 
 ## Control protocol
 
 The full implemented contract, examples, and client integration requirements are
 in [docs/PROTOCOL.md](docs/PROTOCOL.md). File commands below are server protocol
-operations; the terminal CLI currently exposes only the account/HELLO commands.
+operations used by the terminal CLI alongside direct peer transfers.
 
 Each ASCII request ends with LF, with at most 4096 bytes **excluding LF**.
 Commands are case-sensitive. Arguments use exactly one ASCII space. Leading or
