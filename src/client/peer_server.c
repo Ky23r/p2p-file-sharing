@@ -57,40 +57,40 @@ int open_peer_listener(uint16_t port)
 
 static void peer_error(int fd, const char *code)
 {
-    char response[80];
-    int length = snprintf(response, sizeof(response), "ERR %s\n", code);
-    (void)send_all(fd, response, (size_t)length);
+    (void)send_all(fd, code, strlen(code));
 }
 
 static void serve_file(int fd, SharedIndex *index)
 {
     net_reader reader;
     net_reader_init(&reader, fd);
-    char line[PROTOCOL_MAX_LINE + 1];
-    size_t length;
-    int received = recv_line(&reader, line, sizeof(line), &length);
-    if (received != NET_LINE_OK) {
-        if (received == NET_LINE_TOO_LONG)
-            peer_error(fd, "LINE_TOO_LONG");
-        return;
-    }
+    char *line = NULL;
+    size_t capacity = 0, length;
+    int received = recv_line(&reader, &line, &capacity, &length);
     char *tokens[2], name[FILE_NAME_CAP];
-    if (!file_tokens(line, length, tokens, 2) || !protocol_decode_filename(tokens[1], name, sizeof(name))) {
-        peer_error(fd, "INVALID_REQUEST");
+    const char *error = NULL;
+    if (received == NET_LINE_INVALID ||
+        (received == NET_LINE_OK &&
+         (protocol_tokens(line, length, tokens, 2) != 2 ||
+          !protocol_decode_filename(tokens[1], name, sizeof(name)))))
+        error = STATUS_BAD_REQUEST CRLF;
+    else if (received == NET_LINE_OK && strcmp(tokens[0], "GET") != 0)
+        error = STATUS_UNKNOWN_COMMAND CRLF;
+    free(line);
+    if (error != NULL) {
+        peer_error(fd, error);
         return;
     }
-    if (strcmp(tokens[0], "GET") != 0) {
-        peer_error(fd, "UNKNOWN_COMMAND");
+    if (received != NET_LINE_OK)
         return;
-    }
     uint64_t size;
     int source = shared_index_open(index, name, &size);
     if (source < 0) {
-        peer_error(fd, errno == EACCES ? "NOT_SHARED" : errno == ESTALE ? "FILE_CHANGED" : "FILE_UNAVAILABLE");
+        peer_error(fd, errno == ESTALE ? STATUS_CONFLICT CRLF : STATUS_NOT_FOUND CRLF);
         return;
     }
     char header[64];
-    int count = snprintf(header, sizeof(header), "OK FILE %" PRIu64 "\n", size);
+    int count = snprintf(header, sizeof(header), STATUS_OK " %" PRIu64 CRLF, size);
     if (send_all(fd, header, (size_t)count) >= 0) {
         unsigned char buffer[FILE_TRANSFER_BUFFER_SIZE];
         uint64_t remaining = size;

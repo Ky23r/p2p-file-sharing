@@ -13,8 +13,6 @@ typedef struct {
 } auth_store;
 
 enum auth_result { AUTH_OK, AUTH_INVALID, AUTH_USER_EXISTS, AUTH_BAD_CREDENTIALS, AUTH_ERROR };
-bool auth_valid_username(const char *username);
-bool auth_valid_password(const char *password);
 /* Exclusive lifetime lock; 0600 regular file owned by this effective UID.
  * Missing file is created; missing parent or invalid records fail closed.
  * init/destroy run outside worker lifetime. Failure sets errno.

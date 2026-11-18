@@ -1,41 +1,35 @@
 #ifndef P2P_PROTOCOL_H
 #define P2P_PROTOCOL_H
 
-/* Wire protocol: ASCII, case-sensitive commands, single ASCII spaces, LF only.
- * At most 4096 bytes before LF; no CR, NUL, tabs, or other control bytes.
- * REGISTER <username> <password> -> OK REGISTERED (does not log in)
- * LOGIN <username> <password>    -> OK LOGGED_IN
- * HELLO <client_id> <port>       -> OK HELLO (login required)
- * LOGOUT                         -> OK LOGGED_OUT (login required)
- * SHARE <filename> <size>       -> OK SHARED
- * UNSHARE <filename>            -> OK UNSHARED
- * SEARCH <filename>             -> OK RESULTS <count>, then count FILE lines
- * REPORT <client_id> <filename> <reason> -> OK REPORTED
- * File commands require login and HELLO. Filenames use canonical percent
- * encoding; sizes are uint64 decimal. See docs/PROTOCOL.md for the contract.
- * Usernames: 3..32 ASCII letters, digits, or underscore (case-sensitive).
- * Passwords: 8..128 printable ASCII bytes, excluding space (0x21..0x7e).
- * Decimal client IDs: 0..4294967295; ports: 1..65535. No signs.
- * Errors: ERR <ERROR_CODE>\n. See README.md for codes and state transitions.
- * Registration/login allowed only while logged out. LOGOUT keeps TCP open.
- * EOF discards incomplete requests. Oversized requests close the connection.
- * Authentication over this plaintext transport is for controlled local use.
- */
-#define PROTOCOL_MAX_LINE 4096U
-#define USERNAME_MIN 3U
-#define USERNAME_MAX 32U
+/* See docs/PROTOCOL.md for the shared control and peer protocols. */
+#define CRLF "\r\n"
+#define STATUS_OK "200"
+#define STATUS_CREATED "201"
+#define STATUS_SEARCH_END STATUS_OK " END"
+#define STATUS_BAD_REQUEST "400"
+#define STATUS_UNAUTHORIZED "401"
+#define STATUS_FORBIDDEN "403"
+#define STATUS_NOT_FOUND "404"
+#define STATUS_CONFLICT "409"
+#define STATUS_ERROR "500"
+#define STATUS_UNKNOWN_COMMAND "501"
+#define STATUS_BUSY "503"
+
 #define PASSWORD_MIN 8U
-#define PASSWORD_MAX 128U
 #define PROTOCOL_FILENAME_MAX 255U
 #define PROTOCOL_FILENAME_TOKEN_MAX (PROTOCOL_FILENAME_MAX * 3U)
-#define PROTOCOL_SHARE_LIMIT 128U
-#define PROTOCOL_PEER_LIMIT 128U
 #define DEFAULT_SERVER_IP "127.0.0.1"
 #define DEFAULT_SERVER_PORT 9000U
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+/* Split printable ASCII with single spaces. Return 0 on invalid input. */
+size_t protocol_tokens(char *line, size_t length, char **tokens, size_t capacity);
+bool protocol_error(const char *line, size_t length);
+bool protocol_valid_username(const char *username);
+bool protocol_valid_password(const char *password);
 
 /* Decimal without a sign; leading zeros are accepted. */
 bool protocol_parse_uint64(const char *text, uint64_t maximum, uint64_t *value);

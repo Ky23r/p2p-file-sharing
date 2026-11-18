@@ -22,7 +22,6 @@ static void clear_files(session *client)
         client->files = file->next;
         free(file);
     }
-    client->file_count = 0;
 }
 
 static shared_file *find_file(const session *client, const char *filename)
@@ -71,7 +70,7 @@ session *session_add(session_manager *manager, int fd, const char *ip)
     client->fd = fd;
     strcpy(client->ip, ip);
     pthread_mutex_lock(&manager->mutex);
-    if (manager->stopping || manager->count >= SESSION_LIMIT) {
+    if (manager->stopping) {
         pthread_mutex_unlock(&manager->mutex);
         free(client);
         errno = EBUSY;
@@ -121,7 +120,6 @@ void session_finish(session_manager *manager, session *client)
     close(client->fd);
     client->fd = -1;
     clear_files(client);
-    memset(client->username, 0, sizeof(client->username));
     client->authenticated = false;
     client->peer_registered = false;
     client->finished = true;
@@ -159,10 +157,9 @@ bool session_authenticated(session_manager *manager, const session *client)
     return authenticated;
 }
 
-void session_login(session_manager *manager, session *client, const char *username)
+void session_login(session_manager *manager, session *client)
 {
     pthread_mutex_lock(&manager->mutex);
-    strcpy(client->username, username);
     client->authenticated = true;
     pthread_mutex_unlock(&manager->mutex);
 }
@@ -172,7 +169,6 @@ bool session_logout(session_manager *manager, session *client)
     pthread_mutex_lock(&manager->mutex);
     bool was_authenticated = client->authenticated;
     clear_files(client);
-    memset(client->username, 0, sizeof(client->username));
     client->authenticated = false;
     client->peer_registered = false;
     client->client_id = 0;
@@ -216,8 +212,6 @@ enum session_result session_share(session_manager *manager, session *client,
         shared_file *file = find_file(client, filename);
         if (file != NULL) {
             file->size = size;
-        } else if (client->file_count >= PROTOCOL_SHARE_LIMIT) {
-            result = SESSION_SHARE_LIMIT;
         } else {
             file = malloc(sizeof(*file));
             if (file == NULL) {
@@ -227,7 +221,6 @@ enum session_result session_share(session_manager *manager, session *client,
                 file->size = size;
                 file->next = client->files;
                 client->files = file;
-                client->file_count++;
             }
         }
     }
@@ -250,7 +243,6 @@ enum session_result session_unshare(session_manager *manager, session *client,
             shared_file *file = *link;
             *link = file->next;
             free(file);
-            client->file_count--;
         }
     }
     pthread_mutex_unlock(&manager->mutex);
@@ -286,7 +278,6 @@ enum session_result session_search(session_manager *manager, session *client,
                 shared_file *file = find_file(peer, filename);
                 if (file == NULL)
                     continue;
-                strcpy(snapshot[i].filename, file->filename);
                 snapshot[i].size = file->size;
                 snapshot[i].client_id = peer->client_id;
                 strcpy(snapshot[i].ip, peer->ip);
@@ -300,28 +291,5 @@ enum session_result session_search(session_manager *manager, session *client,
     pthread_mutex_unlock(&manager->mutex);
     if (*count > 1)
         qsort(*matches, *count, sizeof(**matches), compare_matches);
-    return result;
-}
-
-enum session_result session_report(session_manager *manager, session *client,
-                                   uint32_t target_id, const char *filename)
-{
-    pthread_mutex_lock(&manager->mutex);
-    enum session_result result = require_peer(client);
-    if (result == SESSION_OK) {
-        result = SESSION_FILE_NOT_FOUND;
-        if (target_id == client->client_id) {
-            result = SESSION_INVALID_REPORT;
-        } else {
-            for (session *peer = manager->head; peer != NULL; peer = peer->next) {
-                if (peer->peer_registered && peer->client_id == target_id &&
-                    find_file(peer, filename) != NULL) {
-                    result = SESSION_OK;
-                    break;
-                }
-            }
-        }
-    }
-    pthread_mutex_unlock(&manager->mutex);
     return result;
 }

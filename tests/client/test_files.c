@@ -62,14 +62,16 @@ int main(void)
     assert(server != NULL);
     int peer = file_connect("127.0.0.1", ntohs(address.sin_port), NULL);
     assert(peer >= 0);
-    const char request[] = "GET bao%20cao%20%2B%25.bin\n";
+    const char request[] = "GET bao%20cao%20%2B%25.bin\r\n";
     assert(send_all(peer, request, strlen(request)) == (ssize_t)strlen(request));
     net_reader reader;
     net_reader_init(&reader, peer);
-    char response[64], body[4];
+    char *response = NULL, body[4];
+    size_t response_capacity = 0;
     size_t header_length;
-    assert(recv_line(&reader, response, sizeof(response), &header_length) == NET_LINE_OK);
-    assert(strcmp(response, "OK FILE 4") == 0);
+    assert(recv_line(&reader, &response, &response_capacity, &header_length) == NET_LINE_OK);
+    assert(strcmp(response, "200 4") == 0);
+    free(response);
     size_t received = 0;
     while (received < sizeof(body)) {
         ssize_t count = net_read(&reader, body + received, sizeof(body) - received);

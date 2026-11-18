@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <openssl/rand.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -52,6 +53,8 @@ const char *download_file(const FileSearchResult *result, const char *directory,
         return "LOCAL_ERROR";
     const char *failure = "LOCAL_ERROR";
     int peer = -1, output = -1;
+    char *header = NULL;
+    size_t capacity = 0;
     char temporary[DOWNLOAD_TEMP_NAME_CAP] = "";
     struct stat existing;
     if (fstatat(folder, result->name, &existing, AT_SYMLINK_NOFOLLOW) == 0) {
@@ -70,29 +73,29 @@ const char *download_file(const FileSearchResult *result, const char *directory,
         failure = errno == ETIMEDOUT || errno == EAGAIN ? "TIMEOUT" : "CONNECT_FAILED";
         goto finish;
     }
-    char request[FILE_NAME_TOKEN_CAP + sizeof("GET \n")];
-    int length = snprintf(request, sizeof(request), "GET %s\n", token);
+    char request[FILE_NAME_TOKEN_CAP + sizeof("GET " CRLF)];
+    int length = snprintf(request, sizeof(request), "GET %s" CRLF, token);
     if (send_all(peer, request, (size_t)length) < 0) {
         failure = receive_failure();
         goto finish;
     }
     net_reader reader;
     net_reader_init(&reader, peer);
-    char header[PROTOCOL_MAX_LINE + 1], *tokens[3];
+    char *tokens[2];
     size_t header_length;
-    int status = recv_line(&reader, header, sizeof(header), &header_length);
+    int status = recv_line(&reader, &header, &capacity, &header_length);
     if (status != NET_LINE_OK) {
         failure = status == NET_LINE_ERROR ? receive_failure() : "TRANSFER_FAILED";
         if (status != NET_LINE_ERROR)
             errno = EPROTO;
         goto finish;
     }
-    if (file_error(header, header_length)) {
+    if (protocol_error(header, header_length)) {
         errno = EPROTO;
-        if (strcmp(header, "ERR NOT_SHARED") == 0 || strcmp(header, "ERR FILE_UNAVAILABLE") == 0) {
+        if (strcmp(header, STATUS_NOT_FOUND) == 0) {
             failure = "NOT_FOUND";
             errno = ENOENT;
-        } else if (strcmp(header, "ERR FILE_CHANGED") == 0) {
+        } else if (strcmp(header, STATUS_CONFLICT) == 0) {
             failure = "SIZE_MISMATCH";
         } else {
             failure = "TRANSFER_FAILED";
@@ -100,8 +103,8 @@ const char *download_file(const FileSearchResult *result, const char *directory,
         goto finish;
     }
     uint64_t size;
-    if (!file_tokens(header, header_length, tokens, 3) || strcmp(tokens[0], "OK") != 0 ||
-        strcmp(tokens[1], "FILE") != 0 || !protocol_parse_uint64(tokens[2], UINT64_MAX, &size)) {
+    if (protocol_tokens(header, header_length, tokens, 2) != 2 || strcmp(tokens[0], STATUS_OK) != 0 ||
+        !protocol_parse_uint64(tokens[1], UINT64_MAX, &size)) {
         failure = "TRANSFER_FAILED";
         errno = EPROTO;
         goto finish;
@@ -154,6 +157,7 @@ const char *download_file(const FileSearchResult *result, const char *directory,
     failure = NULL;
 finish:;
     int error = errno;
+    free(header);
     if (failure != NULL && client_signals_number(signals) != 0) {
         failure = "CANCELLED";
         error = ECANCELED;

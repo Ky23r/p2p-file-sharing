@@ -1,6 +1,7 @@
 #ifndef P2P_FILE_PROTOCOL_H
 #define P2P_FILE_PROTOCOL_H
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -10,8 +11,7 @@
 #define FILE_NAME_CAP (PROTOCOL_FILENAME_MAX + 1U)
 #define FILE_NAME_HEX_CAP (2U * FILE_NAME_CAP)
 #define FILE_NAME_TOKEN_CAP (PROTOCOL_FILENAME_TOKEN_MAX + 1U)
-#define FILE_PATH_CAP 4096U
-#define FILE_ENTRY_LIMIT 256U
+#define FILE_PATH_CAP PATH_MAX
 #define FILE_TIMEOUT_SECONDS 30
 #define FILE_TRANSFER_BUFFER_SIZE 65536U
 
@@ -39,13 +39,6 @@ bool file_hex_decode(const char *encoded, char *text, size_t capacity);
 bool file_name_valid(const char *name);
 /* Decode a local catalog's hex basename into FILE_NAME_CAP caller-owned bytes. */
 bool file_name_decode(const char *encoded, char name[FILE_NAME_CAP]);
-/* line has length bytes plus trailing NUL; tokens has expected pointer slots.
- * Validate every raw byte/count, then replace single-space separators with NUL.
- * Returned pointers borrow line. Failure does not tokenize the line.
- */
-bool file_tokens(char *line, size_t length, char **tokens, size_t expected);
-/* Recognize a whole NUL-terminated ERR line, using length to reject hidden bytes. */
-bool file_error(const char *line, size_t length);
 /* Returned socket is caller-owned and watched when signals is non-NULL. Close
  * it with client_signals_close_socket. Failure returns -1/errno, including
  * ECANCELED when interrupted. With signals, call from the main thread and keep

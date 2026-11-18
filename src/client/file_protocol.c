@@ -67,35 +67,6 @@ bool file_name_decode(const char *encoded, char name[FILE_NAME_CAP])
     return file_hex_decode(encoded, name, FILE_NAME_CAP) && file_name_valid(name);
 }
 
-bool file_tokens(char *line, size_t length, char **tokens, size_t expected)
-{
-    if (length == 0 || expected == 0 || line[0] == ' ' || line[length - 1] == ' ')
-        return false;
-    size_t count = 1;
-    tokens[0] = line;
-    for (size_t i = 0; i < length; ++i) {
-        unsigned char byte = (unsigned char)line[i];
-        if (byte < 0x20 || byte > 0x7e)
-            return false;
-        if (byte == ' ') {
-            if (count == expected || line[i + 1] == ' ')
-                return false;
-            tokens[count++] = line + i + 1;
-        }
-    }
-    if (count != expected)
-        return false;
-    for (size_t i = 1; i < count; ++i)
-        tokens[i][-1] = '\0';
-    return true;
-}
-
-bool file_error(const char *line, size_t length)
-{
-    return length > 4 && memcmp(line, "ERR ", 4) == 0 &&
-           strspn(line + 4, "ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789") == length - 4;
-}
-
 int file_socket_timeout(int fd)
 {
     const struct timeval timeout = {FILE_TIMEOUT_SECONDS, 0};

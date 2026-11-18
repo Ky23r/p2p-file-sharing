@@ -27,7 +27,7 @@ ClientSession *client_session_start(int fd, uint32_t id, uint16_t port,
 void client_session_stop(ClientSession *client);
 
 /* request includes LF; expected excludes LF. One complete exchange; validates
- * success exactly and accepts well-formed ERR codes as recoverable rejections.
+ * success exactly and accepts well-formed numeric error codes as recoverable rejections.
  */
 enum request_result client_exchange(ClientSession *client, const char *request, const char *expected);
 

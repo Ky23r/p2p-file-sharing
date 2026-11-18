@@ -16,39 +16,13 @@
 #define SALT_SIZE 16
 #define HASH_SIZE 32
 #define HASH_ITERATIONS 600000
-#define RECORD_SIZE 160
 
 struct account {
-    char username[USERNAME_MAX + 1];
     unsigned char salt[SALT_SIZE];
     unsigned char hash[HASH_SIZE];
     struct account *next;
+    char username[];
 };
-
-bool auth_valid_username(const char *username)
-{
-    size_t length = strlen(username);
-    if (length < USERNAME_MIN || length > USERNAME_MAX)
-        return false;
-    for (size_t i = 0; i < length; ++i) {
-        unsigned char c = (unsigned char)username[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') || c == '_'))
-            return false;
-    }
-    return true;
-}
-
-bool auth_valid_password(const char *password)
-{
-    size_t length = strlen(password);
-    if (length < PASSWORD_MIN || length > PASSWORD_MAX)
-        return false;
-    for (size_t i = 0; i < length; ++i)
-        if ((unsigned char)password[i] < 0x21 || (unsigned char)password[i] > 0x7e)
-            return false;
-    return true;
-}
 
 static account *find_account(auth_store *store, const char *username)
 {
@@ -107,10 +81,10 @@ static int load_record(auth_store *store, char *line)
         *separator = '\0';
         fields[i] = separator + 1;
     }
-    if (!auth_valid_username(fields[0]) || strcmp(fields[1], "600000") != 0 ||
+    if (!protocol_valid_username(fields[0]) || strcmp(fields[1], "600000") != 0 ||
         find_account(store, fields[0]) != NULL)
         return -1;
-    account *entry = calloc(1, sizeof(*entry));
+    account *entry = malloc(sizeof(*entry) + strlen(fields[0]) + 1);
     if (entry == NULL)
         return -1;
     if (unhex(fields[2], entry->salt, SALT_SIZE) != 0 ||
@@ -135,27 +109,24 @@ static int load_accounts(auth_store *store)
         close(copy);
         return -1;
     }
-    char line[RECORD_SIZE];
-    size_t length = 0;
+    char *line = NULL;
+    size_t capacity = 0;
     int result = 0;
-    int c;
-    while ((c = fgetc(file)) != EOF) {
-        if (c == '\n') {
-            line[length] = '\0';
-            if (load_record(store, line) != 0) {
-                result = -1;
-                break;
-            }
-            length = 0;
-        } else if (c < 0x21 || c > 0x7e || length == sizeof(line) - 1) {
+    ssize_t length;
+    while ((length = getline(&line, &capacity, file)) >= 0) {
+        if (line[length - 1] != '\n' || memchr(line, '\0', (size_t)length) != NULL) {
             result = -1;
             break;
-        } else {
-            line[length++] = (char)c;
+        }
+        line[length - 1] = '\0';
+        if (load_record(store, line) != 0) {
+            result = -1;
+            break;
         }
     }
-    if (length != 0 || ferror(file))
+    if (!feof(file) || ferror(file))
         result = -1;
+    free(line);
     if (fclose(file) != 0)
         result = -1;
     if (result != 0)
@@ -218,26 +189,13 @@ static int persist_account(auth_store *store, const account *entry)
 {
     char salt[SALT_SIZE * 2 + 1];
     char hash[HASH_SIZE * 2 + 1];
-    char record[RECORD_SIZE];
     hex(entry->salt, SALT_SIZE, salt);
     hex(entry->hash, HASH_SIZE, hash);
-    int length = snprintf(record, sizeof(record), "%s:%d:%s:%s\n",
-                          entry->username, HASH_ITERATIONS, salt, hash);
-    if (length < 0 || (size_t)length >= sizeof(record))
-        return -1;
     off_t start = lseek(store->fd, 0, SEEK_END);
     if (start < 0)
         return -1;
-    size_t written = 0;
-    while (written < (size_t)length) {
-        ssize_t n = write(store->fd, record + written, (size_t)length - written);
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n <= 0)
-            break;
-        written += (size_t)n;
-    }
-    if (written == (size_t)length && fsync(store->fd) == 0)
+    if (dprintf(store->fd, "%s:%d:%s:%s\n", entry->username,
+                HASH_ITERATIONS, salt, hash) >= 0 && fsync(store->fd) == 0)
         return 0;
     if (ftruncate(store->fd, start) != 0 || fsync(store->fd) != 0)
         store->healthy = false;
@@ -246,7 +204,7 @@ static int persist_account(auth_store *store, const account *entry)
 
 enum auth_result auth_register(auth_store *store, const char *username, const char *password)
 {
-    if (!auth_valid_username(username) || !auth_valid_password(password))
+    if (!protocol_valid_username(username) || !protocol_valid_password(password))
         return AUTH_INVALID;
     pthread_mutex_lock(&store->mutex);
     bool exists = find_account(store, username) != NULL;
@@ -256,7 +214,7 @@ enum auth_result auth_register(auth_store *store, const char *username, const ch
         return AUTH_ERROR;
     if (exists)
         return AUTH_USER_EXISTS;
-    account *entry = calloc(1, sizeof(*entry));
+    account *entry = malloc(sizeof(*entry) + strlen(username) + 1);
     if (entry == NULL)
         return AUTH_ERROR;
     strcpy(entry->username, username);
@@ -292,7 +250,7 @@ enum auth_result auth_login(auth_store *store, const char *username, const char 
     unsigned char salt[SALT_SIZE] = {0};
     unsigned char expected[HASH_SIZE] = {0};
     unsigned char actual[HASH_SIZE] = {0};
-    if (!auth_valid_username(username) || !auth_valid_password(password))
+    if (!protocol_valid_username(username) || !protocol_valid_password(password))
         return AUTH_INVALID;
     pthread_mutex_lock(&store->mutex);
     account *entry = find_account(store, username);

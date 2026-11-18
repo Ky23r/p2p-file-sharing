@@ -13,12 +13,10 @@ class ControlFixture:
     def __init__(self):
         self.lock = threading.Lock()
         self.peers = {}
-        self.reports = []
         self.requests = []
         self.search_response = None
-        self.share_response = b"OK SHARED\n"
-        self.logout_response = b"OK LOGGED_OUT\n"
-        self.report_response = b"OK REPORTED\n"
+        self.share_response = b"200\r\n"
+        self.logout_response = b"200\r\n"
         self.close_after_search = False
         self.hello_responses = []
         fixture = self
@@ -30,29 +28,32 @@ class ControlFixture:
                 shares = {}
                 try:
                     while True:
-                        line = self.rfile.readline(4098)
+                        line = self.rfile.readline()
                         if not line:
                             break
-                        fields = line.rstrip(b"\n").split(b" ")
+                        if not line.endswith(b"\r\n"):
+                            self.wfile.write(b"400\r\n")
+                            continue
+                        fields = line[:-2].split(b" ")
                         command, args = fields[0], fields[1:]
-                        response = b"ERR INVALID_REQUEST\n"
+                        response = b"400\r\n"
                         with fixture.lock:
                             fixture.requests.append(line)
                             if command == b"REGISTER" and len(args) == 2:
-                                response = b"OK REGISTERED\n"
+                                response = b"201\r\n"
                             elif command == b"LOGIN" and len(args) == 2:
                                 authenticated = True
-                                response = b"OK LOGGED_IN\n"
+                                response = b"200\r\n"
                             elif not authenticated:
-                                response = b"ERR AUTH_REQUIRED\n"
+                                response = b"401\r\n"
                             elif command == b"HELLO" and len(args) == 2:
                                 candidate = (int(args[0]), self.client_address[0], int(args[1]))
                                 holder = fixture.peers.get(candidate[0])
-                                override = fixture.hello_responses.pop(0) if fixture.hello_responses else b"OK HELLO\n"
-                                if override != b"OK HELLO\n":
+                                override = fixture.hello_responses.pop(0) if fixture.hello_responses else b"200\r\n"
+                                if override != b"200\r\n":
                                     response = override
                                 elif holder is not None and holder[0] is not self:
-                                    response = b"ERR CLIENT_ID_IN_USE\n"
+                                    response = b"409\r\n"
                                 else:
                                     if identity is None or candidate[0] != identity[0]:
                                         if identity is not None:
@@ -60,26 +61,26 @@ class ControlFixture:
                                         shares.clear()
                                     identity = candidate
                                     fixture.peers[identity[0]] = (self, identity, shares)
-                                    response = b"OK HELLO\n"
+                                    response = b"200\r\n"
                             elif command == b"LOGOUT" and not args:
                                 response = fixture.logout_response
-                                if response == b"OK LOGGED_OUT\n":
+                                if response == b"200\r\n":
                                     if identity is not None:
                                         fixture.peers.pop(identity[0], None)
                                     identity, authenticated = None, False
                                     shares.clear()
                             elif identity is None:
-                                response = b"ERR HELLO_REQUIRED\n"
+                                response = b"403\r\n"
                             elif command == b"SHARE" and len(args) == 2:
                                 response = fixture.share_response
-                                if response == b"OK SHARED\n":
+                                if response == b"200\r\n":
                                     shares[args[0]] = int(args[1])
                             elif command == b"UNSHARE" and len(args) == 1:
                                 if args[0] in shares:
                                     del shares[args[0]]
-                                    response = b"OK UNSHARED\n"
+                                    response = b"200\r\n"
                                 else:
-                                    response = b"ERR FILE_NOT_FOUND\n"
+                                    response = b"404\r\n"
                             elif command == b"SEARCH" and len(args) == 1:
                                 if fixture.search_response is not None:
                                     response = fixture.search_response
@@ -88,13 +89,10 @@ class ControlFixture:
                                     rows = []
                                     for _, peer, files in fixture.peers.values():
                                         if name in files:
-                                            row = b"FILE " + name + f" {files[name]} {peer[0]} {peer[1]} {peer[2]}\n".encode()
+                                            row = b"FILE " + name + f" {files[name]} {peer[0]} {peer[1]} {peer[2]}\r\n".encode()
                                             rows.append((peer[0], row))
                                     rows.sort()
-                                    response = f"OK RESULTS {len(rows)}\n".encode() + b"".join(row for _, row in rows)
-                            elif command == b"REPORT" and len(args) == 3:
-                                fixture.reports.append(tuple(args))
-                                response = fixture.report_response
+                                    response = b"".join(row for _, row in rows) + b"200 END\r\n"
                         self.wfile.write(response)
                         self.wfile.flush()
                         if command == b"SEARCH" and fixture.close_after_search:

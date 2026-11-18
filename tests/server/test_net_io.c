@@ -1,5 +1,4 @@
 #include "net_io.h"
-#include "protocol.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -21,63 +20,67 @@ static void test_lines(void)
 {
     int fds[2];
     net_reader reader;
-    char line[PROTOCOL_MAX_LINE + 1];
+    char *line = NULL;
+    size_t capacity = 0;
     size_t size;
     pair(fds);
     net_reader_init(&reader, fds[1]);
-    const char input[] = "one\ntwo\n\nx\0y\n";
+    const char input[] = "one\r\ntwo\r\n\r\nx\0y\r\nbare\nlast\r\n";
     assert(send_all(fds[0], input, sizeof(input) - 1) == (ssize_t)sizeof(input) - 1);
     assert(shutdown(fds[0], SHUT_WR) == 0);
-    assert(recv_line(&reader, line, sizeof(line), &size) == NET_LINE_OK);
+    assert(recv_line(&reader, &line, &capacity, &size) == NET_LINE_OK);
     assert(size == 3 && strcmp(line, "one") == 0);
-    assert(recv_line(&reader, line, sizeof(line), &size) == NET_LINE_OK);
+    assert(recv_line(&reader, &line, &capacity, &size) == NET_LINE_OK);
     assert(size == 3 && strcmp(line, "two") == 0);
-    assert(recv_line(&reader, line, sizeof(line), &size) == NET_LINE_OK && size == 0);
-    assert(recv_line(&reader, line, sizeof(line), &size) == NET_LINE_OK);
+    assert(recv_line(&reader, &line, &capacity, &size) == NET_LINE_OK && size == 0);
+    assert(recv_line(&reader, &line, &capacity, &size) == NET_LINE_OK);
     assert(size == 3 && memcmp(line, "x\0y", 3) == 0);
-    assert(recv_line(&reader, line, sizeof(line), &size) == NET_LINE_EOF);
+    assert(recv_line(&reader, &line, &capacity, &size) == NET_LINE_INVALID);
+    assert(recv_line(&reader, &line, &capacity, &size) == NET_LINE_OK);
+    assert(size == 4 && strcmp(line, "last") == 0);
+    assert(recv_line(&reader, &line, &capacity, &size) == NET_LINE_EOF);
+    free(line);
     close(fds[0]);
     close(fds[1]);
 }
 
-static void test_boundaries(void)
+static void test_long_line(void)
 {
-    for (size_t count = PROTOCOL_MAX_LINE; count <= PROTOCOL_MAX_LINE + 1; ++count) {
-        int fds[2];
-        char input[PROTOCOL_MAX_LINE + 2];
-        char line[PROTOCOL_MAX_LINE + 1];
-        size_t size;
-        net_reader reader;
-        pair(fds);
-        memset(input, 'a', count);
-        input[count] = '\n';
-        assert(send_all(fds[0], input, count + 1) == (ssize_t)count + 1);
-        net_reader_init(&reader, fds[1]);
-        int result = recv_line(&reader, line, sizeof(line), &size);
-        assert(result == (count == PROTOCOL_MAX_LINE ? NET_LINE_OK : NET_LINE_TOO_LONG));
-        if (result == NET_LINE_OK)
-            assert(size == count && line[count] == '\0');
-        close(fds[0]);
-        close(fds[1]);
-    }
+    int fds[2];
+    char input[16386];
+    char *line = NULL;
+    size_t capacity = 0, size;
+    net_reader reader;
+    pair(fds);
+    memset(input, 'a', sizeof(input) - 2);
+    memcpy(input + sizeof(input) - 2, "\r\n", 2);
+    assert(send_all(fds[0], input, sizeof(input)) == sizeof(input));
+    net_reader_init(&reader, fds[1]);
+    assert(recv_line(&reader, &line, &capacity, &size) == NET_LINE_OK);
+    assert(size == sizeof(input) - 2 && line[size] == '\0');
+    assert(memcmp(line, input, size) == 0);
+    free(line);
+    close(fds[0]);
+    close(fds[1]);
 }
 
 static void test_errors(void)
 {
     int fds[2];
     net_reader reader;
-    char line[16];
+    char *line = NULL;
+    size_t capacity = 0;
     size_t size;
     pair(fds);
     assert(send_all(fds[0], "partial", 7) == 7);
     close(fds[0]);
     net_reader_init(&reader, fds[1]);
-    assert(recv_line(&reader, line, sizeof(line), &size) == NET_LINE_TRUNCATED);
+    assert(recv_line(&reader, &line, &capacity, &size) == NET_LINE_TRUNCATED);
     assert(send_all(fds[1], "x", 1) == -1); /* must not raise SIGPIPE */
     close(fds[1]);
     net_reader_init(&reader, -1);
-    assert(recv_line(&reader, line, sizeof(line), &size) == NET_LINE_ERROR && errno == EBADF);
-    assert(recv_line(&reader, line, 0, &size) == NET_LINE_ERROR && errno == EINVAL);
+    assert(recv_line(&reader, &line, &capacity, &size) == NET_LINE_ERROR && errno == EBADF);
+    free(line);
     assert(send_all(-1, "x", 1) == -1 && errno == EBADF);
     assert(send_all(-1, NULL, 0) == 0);
     assert(send_all(-1, NULL, 1) == -1 && errno == EINVAL);
@@ -111,7 +114,9 @@ static void *fragment_writer(void *arg)
     pause_briefly();
     assert(send_all(args->fd, "frag", 4) == 4);
     pause_briefly();
-    assert(send_all(args->fd, "mented\nnext\n", 12) == 12);
+    assert(send_all(args->fd, "mented\r", 7) == 7);
+    pause_briefly();
+    assert(send_all(args->fd, "\nnext\r\n", 7) == 7);
     return NULL;
 }
 
@@ -120,7 +125,8 @@ static void test_fragmentation_and_eintr(void)
     int fds[2];
     pthread_t writer;
     net_reader reader;
-    char line[64];
+    char *line = NULL;
+    size_t capacity = 0;
     size_t size;
     struct sigaction action = {0};
     action.sa_handler = on_signal;
@@ -130,10 +136,11 @@ static void test_fragmentation_and_eintr(void)
     writer_args args = {fds[0], pthread_self()};
     net_reader_init(&reader, fds[1]);
     assert(pthread_create(&writer, NULL, fragment_writer, &args) == 0);
-    assert(recv_line(&reader, line, sizeof(line), &size) == NET_LINE_OK);
+    assert(recv_line(&reader, &line, &capacity, &size) == NET_LINE_OK);
     assert(size == 10 && strcmp(line, "fragmented") == 0);
-    assert(recv_line(&reader, line, sizeof(line), &size) == NET_LINE_OK);
+    assert(recv_line(&reader, &line, &capacity, &size) == NET_LINE_OK);
     assert(strcmp(line, "next") == 0 && signals_seen > 0);
+    free(line);
     assert(pthread_join(writer, NULL) == 0);
     close(fds[0]);
     close(fds[1]);
@@ -183,16 +190,18 @@ static void test_header_followed_by_binary_body(void)
 {
     int fds[2];
     net_reader reader;
-    char header[32];
+    char *header = NULL;
+    size_t capacity = 0;
     size_t length;
     unsigned char body[8];
-    const unsigned char wire[] = "OK FILE 5\n\0\nabc";
+    const unsigned char wire[] = "200 5\r\n\0\nabc";
     pair(fds);
     net_reader_init(&reader, fds[1]);
     assert(send_all(fds[0], wire, sizeof(wire) - 1) == (ssize_t)sizeof(wire) - 1);
     assert(shutdown(fds[0], SHUT_WR) == 0);
-    assert(recv_line(&reader, header, sizeof(header), &length) == NET_LINE_OK);
-    assert(strcmp(header, "OK FILE 5") == 0);
+    assert(recv_line(&reader, &header, &capacity, &length) == NET_LINE_OK);
+    assert(strcmp(header, "200 5") == 0);
+    free(header);
     assert(net_read(&reader, body, 2) == 2);
     assert(net_read(&reader, body + 2, sizeof(body) - 2) == 3);
     assert(memcmp(body, "\0\nabc", 5) == 0);
@@ -206,11 +215,11 @@ static void test_header_followed_by_binary_body(void)
 int main(void)
 {
     test_lines();
-    test_boundaries();
+    test_long_line();
     test_errors();
     test_fragmentation_and_eintr();
     test_partial_send();
     test_header_followed_by_binary_body();
-    puts("net_io: 6 test groups passed (buffering, limits, errors, EINTR, partial sends, binary body)");
+    puts("net_io: 6 test groups passed (buffering, long lines, errors, EINTR, partial sends, binary body)");
     return 0;
 }

@@ -2,6 +2,8 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 
@@ -59,16 +61,10 @@ ssize_t net_read(net_reader *reader, void *buffer, size_t size)
     return count;
 }
 
-int recv_line(net_reader *reader, char *line, size_t capacity, size_t *length)
+int recv_line(net_reader *reader, char **line, size_t *capacity, size_t *length)
 {
     size_t count = 0;
 
-    if (reader == NULL || line == NULL || length == NULL || capacity == 0) {
-        errno = EINVAL;
-        return NET_LINE_ERROR;
-    }
-    *length = 0;
-    line[0] = '\0';
     for (;;) {
         if (reader->next == reader->used) {
             ssize_t n = recv(reader->fd, reader->buffer, sizeof(reader->buffer), 0);
@@ -82,14 +78,35 @@ int recv_line(net_reader *reader, char *line, size_t capacity, size_t *length)
             reader->next = 0;
             reader->used = (size_t)n;
         }
-        unsigned char byte = reader->buffer[reader->next++];
-        if (byte == '\n') {
-            *length = count;
+        const unsigned char *start = reader->buffer + reader->next;
+        size_t available = reader->used - reader->next;
+        const unsigned char *newline = memchr(start, '\n', available);
+        size_t bytes = newline == NULL ? available : (size_t)(newline - start);
+        if (bytes >= SIZE_MAX - count) {
+            errno = EOVERFLOW;
+            return NET_LINE_ERROR;
+        }
+        size_t required = count + bytes + 1;
+        if (required > *capacity) {
+            size_t grown = *capacity <= SIZE_MAX / 2 ? *capacity * 2 : required;
+            if (grown < required)
+                grown = required;
+            char *buffer = realloc(*line, grown);
+            if (buffer == NULL)
+                return NET_LINE_ERROR;
+            *line = buffer;
+            *capacity = grown;
+        }
+        memcpy(*line + count, start, bytes);
+        count += bytes;
+        reader->next += bytes;
+        if (newline != NULL) {
+            reader->next++;
+            if (count == 0 || (*line)[count - 1] != '\r')
+                return NET_LINE_INVALID;
+            *length = count - 1;
+            (*line)[*length] = '\0';
             return NET_LINE_OK;
         }
-        if (count == capacity - 1)
-            return NET_LINE_TOO_LONG;
-        line[count++] = (char)byte;
-        line[count] = '\0';
     }
 }

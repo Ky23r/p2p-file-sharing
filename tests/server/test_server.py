@@ -54,12 +54,14 @@ class Connection:
                 return b""
             self.pending += chunk
         result, self.pending = self.pending.split(b"\n", 1)
-        return result
+        if not result.endswith(b"\r"):
+            raise AssertionError("response missing CRLF: %r" % result)
+        return result[:-1]
 
     def command(self, command):
         if isinstance(command, str):
             command = command.encode("ascii")
-        self.socket.sendall(command + b"\n")
+        self.socket.sendall(command + b"\r\n")
         return self.line()
 
     def close(self):
@@ -145,10 +147,10 @@ class ServerTests(unittest.TestCase):
         return server
 
     def register(self, client, username="alice", password=PASSWORD):
-        self.assertEqual(client.command("REGISTER %s %s" % (username, password)), b"OK REGISTERED")
+        self.assertEqual(client.command("REGISTER %s %s" % (username, password)), b"201")
 
     def login(self, client, username="alice", password=PASSWORD):
-        self.assertEqual(client.command("LOGIN %s %s" % (username, password)), b"OK LOGGED_IN")
+        self.assertEqual(client.command("LOGIN %s %s" % (username, password)), b"200")
 
     def assert_startup_error(self, path, preexec_fn=None):
         result = subprocess.run([str(BINARY), "--accounts", str(path), "--port", str(available_port())],
@@ -186,19 +188,19 @@ class ServerTests(unittest.TestCase):
             def work(index):
                 with server.connect() as client:
                     return client.command("UNKNOWN_%d" % index)
-            self.assertEqual(list(pool.map(work, range(48))), [b"ERR UNKNOWN_COMMAND"] * 48)
+            self.assertEqual(list(pool.map(work, range(48))), [b"501"] * 48)
 
     def test_fragmentation_and_pipelining(self):
         server = self.start()
         with server.connect() as client:
-            wire = ("REGISTER alice %s\nLOGIN alice %s\nHELLO 4294967295 65535\nLOGOUT\n" %
+            wire = ("REGISTER alice %s\r\nLOGIN alice %s\r\nHELLO 4294967295 65535\r\nLOGOUT\r\n" %
                     (PASSWORD, PASSWORD)).encode()
             for fragment in (wire[:2], wire[2:11], wire[11:23], wire[23:]):
                 client.socket.sendall(fragment)
                 time.sleep(0.01)
             self.assertEqual([client.line() for _ in range(4)],
-                             [b"OK REGISTERED", b"OK LOGGED_IN", b"OK HELLO", b"OK LOGGED_OUT"])
-            self.assertEqual(client.command("HELLO 1 1"), b"ERR AUTH_REQUIRED")
+                             [b"201", b"200", b"200", b"200"])
+            self.assertEqual(client.command("HELLO 1 1"), b"401")
 
     def test_malformed_requests_and_recovery(self):
         server = self.start()
@@ -206,25 +208,21 @@ class ServerTests(unittest.TestCase):
             cases = [b"", b" LOGOUT", b"LOGOUT ", b"LOGOUT x", b"HELLO", b"HELLO 1",
                      b"HELLO 1 2 3", b"HELLO  1 2", b"HELLO\t1 2", b"LOGOUT\r",
                      b"LOGOUT\x00", b"\xff", b"\x01", b"REGISTER", b"LOGIN alice",
-                     b"REGISTER al password", b"REGISTER bad-name password",
-                     b"REGISTER " + b"a" * 33 + b" password", b"LOGIN alice short",
-                     b"REGISTER alice " + b"x" * 129, b"LOGIN alice pass word"]
+                     b"REGISTER bad-name password", b"LOGIN alice short", b"LOGIN alice pass word"]
             for request in cases:
                 with self.subTest(request=request):
-                    self.assertEqual(client.command(request), b"ERR INVALID_REQUEST")
-            self.assertEqual(client.command("login alice password"), b"ERR UNKNOWN_COMMAND")
-            self.assertEqual(client.command("LOGOUT"), b"ERR AUTH_REQUIRED")
+                    self.assertEqual(client.command(request), b"400")
+            self.assertEqual(client.command("login alice password"), b"501")
+            self.assertEqual(client.command("LOGOUT"), b"401")
 
-    def test_line_limits(self):
+    def test_long_lines_and_invalid_framing_recovery(self):
         server = self.start()
         with server.connect() as client:
-            self.assertEqual(client.command(b"x" * 4096), b"ERR UNKNOWN_COMMAND")
-            self.assertEqual(client.command("LOGOUT"), b"ERR AUTH_REQUIRED")
-        for suffix in (b"", b"\n", b"\nLOGOUT\n"):
-            with server.connect() as client:
-                client.socket.sendall(b"x" * 4097 + suffix)
-                self.assertEqual(client.line(), b"ERR LINE_TOO_LONG")
-                self.assertEqual(client.line(), b"")
+            self.assertEqual(client.command(b"x" * 16400), b"501")
+            client.socket.sendall(b"LOGOUT\nLOGOUT\r")
+            self.assertEqual(client.line(), b"400")
+            client.socket.sendall(b"\n")
+            self.assertEqual(client.line(), b"401")
 
     def test_incomplete_eof_is_discarded(self):
         server = self.start()
@@ -233,32 +231,38 @@ class ServerTests(unittest.TestCase):
             client.socket.shutdown(socket.SHUT_WR)
             self.assertEqual(client.line(), b"")
         with server.connect() as client:
-            self.assertEqual(client.command("LOGIN phantom " + PASSWORD), b"ERR INVALID_CREDENTIALS")
+            self.assertEqual(client.command("LOGIN phantom " + PASSWORD), b"401")
 
     def test_registration_credentials_and_session_transitions(self):
         server = self.start()
         with server.connect() as client:
             self.register(client)
-            self.assertEqual(client.command("HELLO 1 1000"), b"ERR AUTH_REQUIRED")
-            self.assertEqual(client.command("REGISTER alice " + PASSWORD), b"ERR USER_EXISTS")
-            self.assertEqual(client.command("LOGIN alice Incorrect!42"), b"ERR INVALID_CREDENTIALS")
-            self.assertEqual(client.command("LOGIN nobody " + PASSWORD), b"ERR INVALID_CREDENTIALS")
-            self.assertEqual(client.command("LOGIN Alice " + PASSWORD), b"ERR INVALID_CREDENTIALS")
+            self.assertEqual(client.command("HELLO 1 1000"), b"401")
+            self.assertEqual(client.command("REGISTER alice " + PASSWORD), b"409")
+            self.assertEqual(client.command("LOGIN alice Incorrect!42"), b"401")
+            self.assertEqual(client.command("LOGIN nobody " + PASSWORD), b"401")
+            self.assertEqual(client.command("LOGIN Alice " + PASSWORD), b"401")
             self.login(client)
-            self.assertEqual(client.command("LOGIN alice " + PASSWORD), b"ERR ALREADY_AUTHENTICATED")
-            self.assertEqual(client.command("REGISTER other " + PASSWORD), b"ERR ALREADY_AUTHENTICATED")
-            self.assertEqual(client.command("HELLO 1 1000"), b"OK HELLO")
-            self.assertEqual(client.command("LOGOUT"), b"OK LOGGED_OUT")
-            self.assertEqual(client.command("LOGOUT"), b"ERR AUTH_REQUIRED")
+            self.assertEqual(client.command("LOGIN alice " + PASSWORD), b"409")
+            self.assertEqual(client.command("REGISTER other " + PASSWORD), b"409")
+            self.assertEqual(client.command("HELLO 1 1000"), b"200")
+            self.assertEqual(client.command("LOGOUT"), b"200")
+            self.assertEqual(client.command("LOGOUT"), b"401")
             self.login(client)
 
-    def test_username_and_password_boundaries(self):
+    def test_long_credentials_persist_across_restarts(self):
         server = self.start()
+        username, password = "Z" * 5000, "~" * 6000
         with server.connect() as client:
-            for username, password in (("a_0", "!" * 8), ("Z" * 32, "~" * 128)):
-                self.register(client, username, password)
-                self.login(client, username, password)
-                self.assertEqual(client.command("LOGOUT"), b"OK LOGGED_OUT")
+            self.register(client, "a", "!" * 8)
+            self.register(client, username, password)
+        server.stop()
+        restarted = self.start()
+        with restarted.connect() as client:
+            self.login(client, username, password)
+        log = restarted.accounts.with_suffix(".db.log").read_text()
+        self.assertIn("command=LOGIN result=200 username=" + username + "\n", log)
+        self.assertNotIn(password, log)
 
     def test_client_id_and_port_validation(self):
         server = self.start()
@@ -266,11 +270,11 @@ class ServerTests(unittest.TestCase):
             self.register(client)
             self.login(client)
             for client_id, port in (("0", "1"), ("4294967295", "65535"), ("0001", "00080")):
-                self.assertEqual(client.command("HELLO %s %s" % (client_id, port)), b"OK HELLO")
+                self.assertEqual(client.command("HELLO %s %s" % (client_id, port)), b"200")
             for client_id in ("-1", "+1", "4294967296", "9" * 100, "1x", "0x10", "1.0"):
-                self.assertEqual(client.command("HELLO %s 80" % client_id), b"ERR INVALID_REQUEST")
+                self.assertEqual(client.command("HELLO %s 80" % client_id), b"400")
             for port in ("0", "65536", "-1", "+80", "1x", "9" * 100):
-                self.assertEqual(client.command("HELLO 1 %s" % port), b"ERR INVALID_REQUEST")
+                self.assertEqual(client.command("HELLO 1 %s" % port), b"400")
 
     def test_duplicate_ids_updates_and_logout_release(self):
         server = self.start()
@@ -278,30 +282,30 @@ class ServerTests(unittest.TestCase):
             self.register(first)
             self.login(first)
             self.login(second)
-            self.assertEqual(first.command("HELLO 10 1"), b"OK HELLO")
-            self.assertEqual(second.command("HELLO 20 2"), b"OK HELLO")
-            self.assertEqual(first.command("HELLO 20 3"), b"ERR CLIENT_ID_IN_USE")
-            self.assertEqual(second.command("HELLO 10 4"), b"ERR CLIENT_ID_IN_USE")
-            self.assertEqual(first.command("HELLO 10 65535"), b"OK HELLO")
-            self.assertEqual(first.command("HELLO 30 5"), b"OK HELLO")
-            self.assertEqual(second.command("HELLO 10 6"), b"OK HELLO")
-            self.assertEqual(second.command("LOGOUT"), b"OK LOGGED_OUT")
-            self.assertEqual(first.command("HELLO 10 7"), b"OK HELLO")
-            self.assertEqual(second.command("HELLO 50 8"), b"ERR AUTH_REQUIRED")
+            self.assertEqual(first.command("HELLO 10 1"), b"200")
+            self.assertEqual(second.command("HELLO 20 2"), b"200")
+            self.assertEqual(first.command("HELLO 20 3"), b"409")
+            self.assertEqual(second.command("HELLO 10 4"), b"409")
+            self.assertEqual(first.command("HELLO 10 65535"), b"200")
+            self.assertEqual(first.command("HELLO 30 5"), b"200")
+            self.assertEqual(second.command("HELLO 10 6"), b"200")
+            self.assertEqual(second.command("LOGOUT"), b"200")
+            self.assertEqual(first.command("HELLO 10 7"), b"200")
+            self.assertEqual(second.command("HELLO 50 8"), b"401")
 
     def test_abrupt_disconnect_releases_id(self):
         server = self.start()
         with server.connect() as first:
             self.register(first)
             self.login(first)
-            self.assertEqual(first.command("HELLO 99 99"), b"OK HELLO")
+            self.assertEqual(first.command("HELLO 99 99"), b"200")
             first.socket.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
         with server.connect() as second:
             self.login(second)
             def claimed():
                 response = second.command("HELLO 99 100")
-                self.assertIn(response, (b"OK HELLO", b"ERR CLIENT_ID_IN_USE"))
-                return response == b"OK HELLO"
+                self.assertIn(response, (b"200", b"409"))
+                return response == b"200"
             eventually(claimed)
 
     def test_concurrent_duplicate_registration(self):
@@ -313,8 +317,8 @@ class ServerTests(unittest.TestCase):
                 return client.command("REGISTER shared " + PASSWORD)
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(register_same, range(8)))
-        self.assertEqual(results.count(b"OK REGISTERED"), 1)
-        self.assertEqual(results.count(b"ERR USER_EXISTS"), 7)
+        self.assertEqual(results.count(b"201"), 1)
+        self.assertEqual(results.count(b"409"), 7)
         self.assertEqual(len(server.accounts.read_bytes().splitlines()), 1)
 
     def test_concurrent_registration_and_session_isolation(self):
@@ -326,12 +330,12 @@ class ServerTests(unittest.TestCase):
                 username = "user_%d" % index
                 self.register(client, username)
                 self.login(client, username)
-                self.assertEqual(client.command("HELLO %d %d" % (index, index + 1)), b"OK HELLO")
+                self.assertEqual(client.command("HELLO %d %d" % (index, index + 1)), b"200")
                 barrier.wait(timeout=15)
                 if index % 2 == 0:
-                    self.assertEqual(client.command("LOGOUT"), b"OK LOGGED_OUT")
+                    self.assertEqual(client.command("LOGOUT"), b"200")
                 else:
-                    self.assertEqual(client.command("HELLO %d 65535" % index), b"OK HELLO")
+                    self.assertEqual(client.command("HELLO %d 65535" % index), b"200")
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(worker, range(8)))
         self.assertEqual(len(server.accounts.read_bytes().splitlines()), 8)
@@ -350,8 +354,8 @@ class ServerTests(unittest.TestCase):
             return client.command("HELLO 12345 80")
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(clients)) as pool:
             results = list(pool.map(claim, clients))
-        self.assertEqual(results.count(b"OK HELLO"), 1)
-        self.assertEqual(results.count(b"ERR CLIENT_ID_IN_USE"), 5)
+        self.assertEqual(results.count(b"200"), 1)
+        self.assertEqual(results.count(b"409"), 5)
 
     def test_persistence_hashes_salts_and_permissions(self):
         server = self.start()
@@ -379,8 +383,8 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(restarted.accounts.stat().st_mode), 0o600)
         with restarted.connect() as client:
             self.login(client, "alice")
-            self.assertEqual(client.command("HELLO 0 1"), b"OK HELLO")
-            self.assertEqual(client.command("LOGOUT"), b"OK LOGGED_OUT")
+            self.assertEqual(client.command("HELLO 0 1"), b"200")
+            self.assertEqual(client.command("LOGOUT"), b"200")
             self.login(client, "bobby")
 
     def test_corrupted_account_storage_fails_closed(self):
@@ -432,28 +436,19 @@ class ServerTests(unittest.TestCase):
             resource.setrlimit(resource.RLIMIT_FSIZE, (20, 20))
         server = self.start(preexec_fn=limit_file_size)
         with server.connect() as client:
-            self.assertEqual(client.command("REGISTER alice " + PASSWORD), b"ERR INTERNAL_ERROR")
-            self.assertEqual(client.command("LOGIN alice " + PASSWORD), b"ERR INVALID_CREDENTIALS")
+            self.assertEqual(client.command("REGISTER alice " + PASSWORD), b"500")
+            self.assertEqual(client.command("LOGIN alice " + PASSWORD), b"401")
             self.assertEqual(server.accounts.read_bytes(), b"")
 
-    def test_connection_limit_and_capacity_recovery(self):
+    def test_over_128_simultaneous_connections(self):
         server = self.start()
         clients = []
         try:
-            for _ in range(128):
+            for _ in range(140):
                 client = server.connect()
                 clients.append(client)
-                self.assertEqual(client.command("LOGOUT"), b"ERR AUTH_REQUIRED")
-            with server.connect() as extra:
-                self.assertEqual(extra.line(), b"ERR SERVER_BUSY")
-                self.assertEqual(extra.line(), b"")
-            clients.pop().close()
-            def capacity_recovers():
-                with server.connect() as client:
-                    response = client.command("LOGOUT")
-                    self.assertIn(response, (b"ERR AUTH_REQUIRED", b"ERR SERVER_BUSY"))
-                    return response == b"ERR AUTH_REQUIRED"
-            eventually(capacity_recovers)
+                self.assertEqual(client.command("LOGOUT"), b"401")
+            self.assertEqual(clients[0].command("LOGOUT"), b"401")
         finally:
             for client in clients:
                 client.close()
@@ -467,7 +462,7 @@ class ServerTests(unittest.TestCase):
         for index in range(160):
             with server.connect() as client:
                 if index % 3:
-                    self.assertEqual(client.command("NOPE"), b"ERR UNKNOWN_COMMAND")
+                    self.assertEqual(client.command("NOPE"), b"501")
                 else:
                     client.socket.sendall(b"incomplete")
         eventually(lambda: len(list(fd_path.iterdir())) == initial_fds and
@@ -480,8 +475,8 @@ class ServerTests(unittest.TestCase):
             for _ in range(300):
                 data = b"?" + bytes(generator.choice([c for c in range(256) if c != 10])
                                      for _ in range(generator.randrange(150)))
-                self.assertIn(client.command(data), (b"ERR UNKNOWN_COMMAND", b"ERR INVALID_REQUEST"))
-            self.assertEqual(client.command("HELLO 0 1"), b"ERR AUTH_REQUIRED")
+                self.assertIn(client.command(data), (b"501", b"400"))
+            self.assertEqual(client.command("HELLO 0 1"), b"401")
 
     def test_graceful_shutdown_with_idle_and_partial_clients(self):
         for signum in (signal.SIGINT, signal.SIGTERM):
@@ -507,7 +502,7 @@ class ServerTests(unittest.TestCase):
         for _ in range(6):
             server = self.start(port=port)
             with server.connect() as client:
-                self.assertEqual(client.command("LOGOUT"), b"ERR AUTH_REQUIRED")
+                self.assertEqual(client.command("LOGOUT"), b"401")
             server.stop()
 
     def test_shutdown_during_account_operations(self):
@@ -515,7 +510,7 @@ class ServerTests(unittest.TestCase):
         clients = [server.connect() for _ in range(6)]
         try:
             for index, client in enumerate(clients):
-                client.socket.sendall(("REGISTER user_%d %s\n" % (index, PASSWORD)).encode())
+                client.socket.sendall(("REGISTER user_%d %s\r\n" % (index, PASSWORD)).encode())
             # The server must wait for any KDF/storage operations already started.
             # Requests still in the accept/receive queue may be discarded.
             time.sleep(0.02)
@@ -527,7 +522,7 @@ class ServerTests(unittest.TestCase):
                 for record in raw.splitlines():
                     username = record.split(b":", 1)[0].decode()
                     self.login(client, username)
-                    self.assertEqual(client.command("LOGOUT"), b"OK LOGGED_OUT")
+                    self.assertEqual(client.command("LOGOUT"), b"200")
         finally:
             for client in clients:
                 client.close()
@@ -556,26 +551,32 @@ class ClientCoreTests(unittest.TestCase):
         first = self.run_client(f"register alice\n{PASSWORD}\nlogin alice\nWrongPass!\n"
                                 f"hello\nlogin alice\n{PASSWORD}\nlogout\nquit\n")
         self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertEqual(first.stdout.splitlines(), ["OK REGISTERED", "ERR INVALID_CREDENTIALS",
-                                                      "ERR AUTH_REQUIRED", "OK LOGGED_IN",
-                                                      "OK HELLO", "OK LOGGED_OUT"])
+        self.assertEqual(first.stdout.splitlines(), ["201", "401",
+                                                      "401", "200",
+                                                      "200 HELLO", "200 LOGGED_OUT"])
         saved = self.config.read_text()
         self.assertRegex(saved, r"^[0-9]{1,10}\n\Z")
 
         with self.server.connect() as peer:
-            self.assertEqual(peer.command(f"LOGIN alice {PASSWORD}"), b"OK LOGGED_IN")
-            self.assertEqual(peer.command(f"HELLO {saved.strip()} 12345"), b"OK HELLO")
+            self.assertEqual(peer.command(f"LOGIN alice {PASSWORD}"), b"200")
+            self.assertEqual(peer.command(f"HELLO {saved.strip()} 12345"), b"200")
             second = self.run_client(f"login alice\n{PASSWORD}\nlogout\nquit\n")
         self.assertEqual(second.returncode, 0, second.stderr)
-        self.assertEqual(second.stdout.splitlines(), ["OK LOGGED_IN", "ERR CLIENT_ID_IN_USE",
-                                                       "OK LOGGED_OUT"])
+        self.assertEqual(second.stdout.splitlines(), ["200", "409",
+                                                       "200 LOGGED_OUT"])
         self.assertEqual(self.config.read_text(), saved)
 
+    def test_cli_accepts_long_account_commands_and_passwords(self):
+        username, password = "user_" + "x" * 5000, "!" * 6000
+        result = self.run_client(f"register {username}\n{password}\nlogin {username}\n{password}\nquit\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["201", "200", "200 HELLO"])
+
     def test_script_does_not_treat_password_as_a_command_after_invalid_username(self):
-        client = self.run_client(f"register ab\nquit\nregister alice\n{PASSWORD}\nquit\n")
+        client = self.run_client(f"register bad-name\nquit\nregister alice\n{PASSWORD}\nquit\n")
         self.assertEqual(client.returncode, 0, client.stderr)
-        self.assertEqual(client.stdout, "OK REGISTERED\n")
-        self.assertIn("Username must be", client.stderr)
+        self.assertEqual(client.stdout, "201\n")
+        self.assertIn("Username must contain", client.stderr)
 
     def test_hello_announces_a_reachable_listener_and_rejects_a_malformed_reply(self):
         self.config.write_text("4294967295\n")
@@ -589,15 +590,15 @@ class ClientCoreTests(unittest.TestCase):
             connection, _ = listener.accept()
             with connection, connection.makefile("rb") as requests:
                 connection.settimeout(5)
-                self.assertEqual(requests.readline(), f"LOGIN alice {PASSWORD}\n".encode())
-                connection.sendall(b"OK LOGGED_IN\n")
-                self.assertEqual(requests.readline(), f"HELLO 4294967295 {peer_port}\n".encode())
+                self.assertEqual(requests.readline(), f"LOGIN alice {PASSWORD}\r\n".encode())
+                connection.sendall(b"200\r\n")
+                self.assertEqual(requests.readline(), f"HELLO 4294967295 {peer_port}\r\n".encode())
                 with socket.create_connection(("127.0.0.1", peer_port), timeout=5):
                     pass
-                connection.sendall(b"OK HELLO\x00ignored\n")
+                connection.sendall(b"200\x00ignored\r\n")
             client = pending.result()
         self.assertNotEqual(client.returncode, 0)
-        self.assertEqual(client.stdout.splitlines(), ["OK LOGGED_IN"])
+        self.assertEqual(client.stdout.splitlines(), ["200"])
         self.assertIn("Invalid response", client.stderr)
 
     def test_client_fails_to_start_when_peer_port_is_in_use(self):
@@ -632,10 +633,10 @@ class ClientCoreTests(unittest.TestCase):
                 read_until(b"Password: ")
                 self.assertFalse(termios.tcgetattr(child_tty)[3] & termios.ECHO)
                 os.write(terminal, PASSWORD.encode() + b"\x00junk\n\n")
-                self.assertNotIn(PASSWORD.encode(), read_until(b"Password must be"))
+                self.assertNotIn(PASSWORD.encode(), read_until(b"Password must contain"))
                 self.assertTrue(termios.tcgetattr(child_tty)[3] & termios.ECHO)
                 with self.server.connect() as peer:
-                    self.assertEqual(peer.command(f"LOGIN alice {PASSWORD}"), b"ERR INVALID_CREDENTIALS")
+                    self.assertEqual(peer.command(f"LOGIN alice {PASSWORD}"), b"401")
 
                 os.write(terminal, b"login alice\n")
                 read_until(b"Password: ")

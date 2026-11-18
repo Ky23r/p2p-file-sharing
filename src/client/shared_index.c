@@ -17,8 +17,26 @@ struct SharedIndex {
     int lock_fd;
     size_t count;
     bool online;
-    SharedFile entries[FILE_ENTRY_LIMIT];
+    size_t capacity;
+    SharedFile *entries;
 };
+
+static int reserve_entry(SharedIndex *index)
+{
+    if (index->count < index->capacity)
+        return 0;
+    if (index->capacity > SIZE_MAX / sizeof(*index->entries) / 2) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    size_t capacity = index->capacity == 0 ? 8 : index->capacity * 2;
+    SharedFile *entries = realloc(index->entries, capacity * sizeof(*entries));
+    if (entries == NULL)
+        return -1;
+    index->entries = entries;
+    index->capacity = capacity;
+    return 0;
+}
 
 static size_t find_entry(SharedIndex *index, const char *name)
 {
@@ -116,13 +134,14 @@ static int read_index(SharedIndex *index)
     while (fgets(line, sizeof(line), file) != NULL) {
         size_t length = strlen(line);
         char *separator = strchr(line, '\t');
-        if (index->count == FILE_ENTRY_LIMIT || length == 0 || line[length - 1] != '\n' || separator == NULL) {
+        if (length == 0 || line[length - 1] != '\n' || separator == NULL || reserve_entry(index) != 0) {
             result = -1;
             break;
         }
         line[length - 1] = '\0';
         *separator++ = '\0';
         SharedFile *entry = &index->entries[index->count];
+        memset(entry, 0, sizeof(*entry));
         if (!file_name_decode(line, entry->name) ||
             !file_hex_decode(separator, entry->path, sizeof(entry->path)) || !valid_path(entry->path) ||
             strcmp(strrchr(entry->path, '/') + 1, entry->name) != 0 || find_entry(index, entry->name) != index->count) {
@@ -189,24 +208,33 @@ void shared_index_destroy(SharedIndex *index)
         close(index->lock_fd);
     pthread_mutex_destroy(&index->mutex);
     free(index->path);
+    free(index->entries);
     free(index);
 }
 
 int shared_index_add(SharedIndex *index, const char *path, char name[FILE_NAME_CAP])
 {
-    char canonical[FILE_PATH_CAP];
-    if (realpath(path, canonical) == NULL)
+    char *canonical = realpath(path, NULL);
+    if (canonical == NULL)
         return -1;
     const char *basename = strrchr(canonical, '/') + 1;
     char token[FILE_NAME_TOKEN_CAP];
+    if (strlen(canonical) >= FILE_PATH_CAP) {
+        free(canonical);
+        errno = ENAMETOOLONG;
+        return -1;
+    }
     if (!valid_path(canonical) || !protocol_encode_filename(basename, token, sizeof(token))) {
+        free(canonical);
         errno = EINVAL;
         return -1;
     }
     uint64_t size;
     int fd = shared_file_open(canonical, &size);
-    if (fd < 0)
+    if (fd < 0) {
+        free(canonical);
         return -1;
+    }
     close(fd);
     strcpy(name, basename);
     pthread_mutex_lock(&index->mutex);
@@ -217,8 +245,7 @@ int shared_index_add(SharedIndex *index, const char *path, char name[FILE_NAME_C
             errno = EEXIST;
             result = -1;
         }
-    } else if (index->count == FILE_ENTRY_LIMIT) {
-        errno = ENOSPC;
+    } else if (reserve_entry(index) != 0) {
         result = -1;
     } else {
         SharedFile *entry = &index->entries[index->count++];
@@ -226,12 +253,13 @@ int shared_index_add(SharedIndex *index, const char *path, char name[FILE_NAME_C
         strcpy(entry->path, canonical);
         entry->size = size;
         entry->announced = false;
-        if (save_index(index, FILE_ENTRY_LIMIT) != 0) {
+        if (save_index(index, SIZE_MAX) != 0) {
             index->count--;
             result = -1;
         }
     }
     pthread_mutex_unlock(&index->mutex);
+    free(canonical);
     return result;
 }
 

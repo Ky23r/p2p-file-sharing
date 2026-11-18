@@ -4,6 +4,8 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -43,23 +45,30 @@ fail:
 void service_log_write(service_log *log, const char *format, ...)
 {
     int saved = errno;
-    char line[2048];
+    char timestamp[32];
     time_t now = time(NULL);
     struct tm utc;
     if (gmtime_r(&now, &utc) == NULL) {
         errno = saved;
         return;
     }
-    size_t used = strftime(line, sizeof(line), "%Y-%m-%dT%H:%M:%SZ ", &utc);
-    va_list args;
+    size_t prefix = strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ ", &utc);
+    va_list args, copy;
     va_start(args, format);
-    int length = vsnprintf(line + used, sizeof(line) - used, format, args);
+    va_copy(copy, args);
+    int length = vsnprintf(NULL, 0, format, copy);
+    va_end(copy);
+    char *line = length < 0 ? NULL : malloc(prefix + (size_t)length + 1);
+    if (line != NULL) {
+        memcpy(line, timestamp, prefix);
+        vsnprintf(line + prefix, (size_t)length + 1, format, args);
+    }
     va_end(args);
-    if (length < 0 || (size_t)length >= sizeof(line) - used - 1) {
+    if (line == NULL) {
         errno = saved;
         return;
     }
-    used += (size_t)length;
+    size_t used = prefix + (size_t)length;
     line[used++] = '\n';
     pthread_mutex_lock(&log->mutex);
     size_t sent = 0;
@@ -72,6 +81,7 @@ void service_log_write(service_log *log, const char *format, ...)
         sent += (size_t)n;
     }
     pthread_mutex_unlock(&log->mutex);
+    free(line);
     errno = saved;
 }
 

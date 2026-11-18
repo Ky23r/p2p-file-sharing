@@ -28,7 +28,7 @@ typedef struct {
     uint16_t peer_port;
 } client_options;
 
-enum input_result { INPUT_END, INPUT_ERROR, INPUT_INVALID, INPUT_OK };
+enum input_result { INPUT_END, INPUT_EMPTY, INPUT_ERROR, INPUT_INVALID, INPUT_OK };
 
 typedef struct {
     int control_failure_fd;
@@ -63,11 +63,8 @@ static void commands(void)
 
 static bool parse_port(const char *text, uint16_t *port)
 {
-    if (*text == '\0' || text[strspn(text, "0123456789")] != '\0')
-        return false;
-    errno = 0;
-    unsigned long value = strtoul(text, NULL, 10);
-    if (errno == ERANGE || value == 0 || value > UINT16_MAX)
+    uint64_t value;
+    if (!protocol_parse_uint64(text, UINT16_MAX, &value) || value == 0)
         return false;
     *port = (uint16_t)value;
     return true;
@@ -101,8 +98,7 @@ static bool parse_options(int argc, char **argv, client_options *options)
     return true;
 }
 
-/* Drain excess bytes before reading the next line. */
-static enum input_result read_input(char *line, size_t capacity, const InputContext *input)
+static enum input_result read_input(char **line, size_t *capacity, const InputContext *input)
 {
     size_t length = 0;
     bool invalid = false;
@@ -133,44 +129,42 @@ static enum input_result read_input(char *line, size_t capacity, const InputCont
         byte = getchar();
         if (byte == '\n' || byte == EOF)
             break;
-        if (byte == '\0' || length == capacity - 1)
+        if (byte == '\0')
             invalid = true;
-        else
-            line[length++] = (char)byte;
+        if (invalid)
+            continue;
+        if (*capacity == 0 || length == *capacity - 1) {
+            if (*capacity > SIZE_MAX / 2) {
+                errno = EOVERFLOW;
+                return INPUT_ERROR;
+            }
+            size_t grown = *capacity == 0 ? 128 : *capacity * 2;
+            char *buffer = malloc(grown);
+            if (buffer == NULL)
+                return INPUT_ERROR;
+            if (*line != NULL) {
+                memcpy(buffer, *line, length);
+                OPENSSL_cleanse(*line, length);
+                free(*line);
+            }
+            *line = buffer;
+            *capacity = grown;
+        }
+        (*line)[length++] = (char)byte;
     }
     if (byte == EOF && ferror(stdin))
         return INPUT_ERROR;
-    if (byte == EOF && length == 0 && !invalid)
-        return INPUT_END;
-    if (byte == '\n' && length > 0 && line[length - 1] == '\r')
+    if (invalid)
+        return INPUT_INVALID;
+    if (length == 0)
+        return byte == EOF ? INPUT_END : INPUT_EMPTY;
+    if (byte == '\n' && (*line)[length - 1] == '\r')
         --length;
-    line[length] = '\0';
-    return invalid ? INPUT_INVALID : INPUT_OK;
+    (*line)[length] = '\0';
+    return INPUT_OK;
 }
 
-static bool valid_username(const char *username)
-{
-    if (username == NULL)
-        return false;
-    size_t length = strlen(username);
-    return length >= USERNAME_MIN && length <= USERNAME_MAX &&
-           strspn(username, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_") == length;
-}
-
-static bool valid_password(const char *password)
-{
-    size_t length = strlen(password);
-    if (length < PASSWORD_MIN || length > PASSWORD_MAX)
-        return false;
-    for (size_t i = 0; i < length; ++i) {
-        unsigned char byte = (unsigned char)password[i];
-        if (byte < 0x21 || byte > 0x7e)
-            return false;
-    }
-    return true;
-}
-
-static enum input_result read_password(char *password, size_t capacity, bool interactive,
+static enum input_result read_password(char **password, size_t *capacity, bool interactive,
                                        const InputContext *input)
 {
     if (!interactive)
@@ -205,14 +199,18 @@ static enum input_result read_password(char *password, size_t capacity, bool int
 static enum request_result account_command(ClientSession *server, bool registering,
                                            const char *username, bool interactive, const InputContext *context)
 {
-    bool username_valid = valid_username(username);
-    char password[PASSWORD_MAX + 2];
+    bool username_valid = protocol_valid_username(username);
+    char *password = NULL;
+    size_t capacity = 0;
     enum input_result input = INPUT_INVALID;
     /* Scripted account commands with a username carry a separate password line. */
     if (username_valid || (!interactive && username != NULL))
-        input = read_password(password, sizeof(password), interactive, context);
-    if (input != INPUT_OK || !username_valid || !valid_password(password)) {
-        OPENSSL_cleanse(password, sizeof(password));
+        input = read_password(&password, &capacity, interactive, context);
+    if (input != INPUT_OK || !username_valid || !protocol_valid_password(password)) {
+        if (password != NULL) {
+            OPENSSL_cleanse(password, capacity);
+            free(password);
+        }
         if (input == INPUT_ERROR) {
             if (client_signals_number(context->signals) == 0)
                 perror("Reading password");
@@ -223,20 +221,27 @@ static enum request_result account_command(ClientSession *server, bool registeri
             return REQUEST_FAILED;
         }
         if (!username_valid)
-            fprintf(stderr, "Username must be %u..%u letters, digits, or underscores.\n",
-                    USERNAME_MIN, USERNAME_MAX);
+            fputs("Username must contain letters, digits, or underscores.\n", stderr);
         else
-            fprintf(stderr, "Password must be %u..%u printable ASCII characters without spaces.\n",
-                    PASSWORD_MIN, PASSWORD_MAX);
+            fprintf(stderr, "Password must contain at least %u printable ASCII characters without spaces.\n",
+                    PASSWORD_MIN);
         return REQUEST_REJECTED;
     }
 
-    char request[sizeof("REGISTER  \n") + USERNAME_MAX + PASSWORD_MAX];
-    snprintf(request, sizeof(request), "%s %s %s\n", registering ? "REGISTER" : "LOGIN",
-             username, password);
-    OPENSSL_cleanse(password, sizeof(password));
-    enum request_result result = client_exchange(server, request, registering ? "OK REGISTERED" : "OK LOGGED_IN");
-    OPENSSL_cleanse(request, sizeof(request));
+    const char *command = registering ? "REGISTER" : "LOGIN";
+    size_t length = strlen(command) + strlen(username) + strlen(password) + sizeof("  " CRLF);
+    char *request = malloc(length);
+    if (request != NULL)
+        snprintf(request, length, "%s %s %s" CRLF, command, username, password);
+    OPENSSL_cleanse(password, capacity);
+    free(password);
+    if (request == NULL) {
+        perror("Preparing account request");
+        return REQUEST_FAILED;
+    }
+    enum request_result result = client_exchange(server, request, registering ? STATUS_CREATED : STATUS_OK);
+    OPENSSL_cleanse(request, length);
+    free(request);
     return result;
 }
 
@@ -249,28 +254,32 @@ static int run_client(ClientSession *server, uint32_t id, uint16_t peer_port, Cl
                "Type 'help' for commands.\n", id, (unsigned)peer_port);
     }
 
+    char *line = NULL;
+    size_t capacity = 0;
+    int exit_status = EXIT_FAILURE;
     for (;;) {
         if (interactive) {
             fputs("p2p> ", stdout);
             fflush(stdout);
         }
-        char line[FILE_PATH_CAP + 32];
-        enum input_result input = read_input(line, sizeof(line), &input_context);
-        if (input == INPUT_END)
-            return client_session_failed(server) ? EXIT_FAILURE : EXIT_SUCCESS;
+        enum input_result input = read_input(&line, &capacity, &input_context);
+        if (input == INPUT_END) {
+            exit_status = client_session_failed(server) ? EXIT_FAILURE : EXIT_SUCCESS;
+            break;
+        }
         if (input == INPUT_ERROR) {
             if (client_signals_number(signals) == 0)
                 perror("Reading command");
-            return EXIT_FAILURE;
+            break;
         }
         if (input == INPUT_INVALID) {
             fputs("Invalid input line.\n", stderr);
             continue;
         }
-        if (*line == '\0')
+        if (input == INPUT_EMPTY || *line == '\0')
             continue;
         if (client_session_failed(server))
-            return EXIT_FAILURE;
+            break;
 
         char *argument = strchr(line, ' ');
         if (argument != NULL) {
@@ -302,13 +311,16 @@ static int run_client(ClientSession *server, uint32_t id, uint16_t peer_port, Cl
         } else if (strcmp(line, "help") == 0) {
             commands();
         } else if (strcmp(line, "quit") == 0) {
-            return EXIT_SUCCESS;
+            exit_status = EXIT_SUCCESS;
+            break;
         } else {
             fputs("Unknown command. Type 'help' for commands.\n", stderr);
         }
         if (result == REQUEST_FAILED)
-            return EXIT_FAILURE;
+            break;
     }
+    free(line);
+    return exit_status;
 }
 
 int main(int argc, char **argv)

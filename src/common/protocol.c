@@ -1,6 +1,52 @@
 #include "protocol.h"
 
+#include <limits.h>
 #include <string.h>
+
+size_t protocol_tokens(char *line, size_t length, char **tokens, size_t capacity)
+{
+    if (length == 0 || capacity == 0 || line[0] == ' ' || line[length - 1] == ' ')
+        return 0;
+    size_t count = 1;
+    tokens[0] = line;
+    for (size_t i = 0; i < length; ++i) {
+        unsigned char byte = (unsigned char)line[i];
+        if (byte < 0x20 || byte > 0x7e)
+            return 0;
+        if (byte == ' ') {
+            if (count == capacity || line[i + 1] == ' ')
+                return 0;
+            tokens[count++] = line + i + 1;
+        }
+    }
+    for (size_t i = 1; i < count; ++i)
+        tokens[i][-1] = '\0';
+    return count;
+}
+
+bool protocol_error(const char *line, size_t length)
+{
+    return length == 3 && (line[0] == '4' || line[0] == '5') &&
+           line[1] >= '0' && line[1] <= '9' &&
+           line[2] >= '0' && line[2] <= '9';
+}
+
+bool protocol_valid_username(const char *username)
+{
+    return username != NULL && *username != '\0' &&
+           username[strspn(username, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")] == '\0';
+}
+
+bool protocol_valid_password(const char *password)
+{
+    size_t length = strlen(password);
+    if (length < PASSWORD_MIN || length > INT_MAX)
+        return false;
+    for (size_t i = 0; i < length; ++i)
+        if ((unsigned char)password[i] < 0x21 || (unsigned char)password[i] > 0x7e)
+            return false;
+    return true;
+}
 
 bool protocol_parse_uint64(const char *text, uint64_t maximum, uint64_t *value)
 {
