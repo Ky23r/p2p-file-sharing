@@ -458,8 +458,8 @@ enum request_result client_search(ClientSession *client, const char *query)
     client->result_count = count;
     for (size_t i = 0; i < client->result_count; ++i) {
         FileSearchResult *entry = &client->results[i];
-        printf("%zu: %s (client %" PRIu32 ", %s:%u, %" PRIu64 " bytes)\n",
-               i + 1, entry->name, entry->client_id, entry->ip, (unsigned)entry->port, entry->size);
+        printf("%zu: %s (client %" PRIu32 ", %s:%u)\n",
+               i + 1, entry->name, entry->client_id, entry->ip, (unsigned)entry->port);
     }
     puts(STATUS_SEARCH_END);
     result = REQUEST_OK;

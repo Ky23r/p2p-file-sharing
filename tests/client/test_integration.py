@@ -35,9 +35,9 @@ class ClientServerIntegrationTests(unittest.TestCase):
         client.send("search " + name)
         return client.search_results()
 
-    def expected_row(self, name, size, identity=20, port=None):
+    def expected_row(self, name, identity=20, port=None):
         port = self.owner.peer_port if port is None else port
-        return f"1: {name} (client {identity}, 127.0.0.1:{port}, {size} bytes)"
+        return f"1: {name} (client {identity}, 127.0.0.1:{port})"
 
     def share(self, name, contents):
         (self.owner.directory / name).write_bytes(contents)
@@ -51,7 +51,7 @@ class ClientServerIntegrationTests(unittest.TestCase):
                 self.share(name, contents)
                 self.assertEqual(self.search(self.viewer, name.split()[0]), [])
                 self.assertEqual(self.search(self.viewer, name),
-                                 [self.expected_row(name, len(contents))])
+                                 [self.expected_row(name)])
                 self.viewer.send("download 1")
                 self.viewer.expect("Downloaded " + name)
                 self.assertEqual((self.viewer.directory / name).read_bytes(), contents)
@@ -65,7 +65,7 @@ class ClientServerIntegrationTests(unittest.TestCase):
         name, contents = "lifecycle.bin", b"persistent local share\x00\n"
         self.share(name, contents)
         self.assertEqual(self.search(self.viewer, name),
-                         [self.expected_row(name, len(contents))])
+                         [self.expected_row(name)])
 
         self.owner.send("logout")
         self.owner.expect("200 LOGGED_OUT")
@@ -73,7 +73,7 @@ class ClientServerIntegrationTests(unittest.TestCase):
         self.owner.login()
         self.owner.expect("200 SHARED")
         self.assertEqual(self.search(self.viewer, name),
-                         [self.expected_row(name, len(contents))])
+                         [self.expected_row(name)])
 
         self.owner.close()
         self.assertEqual(self.owner.process.returncode, 0)
@@ -82,7 +82,7 @@ class ClientServerIntegrationTests(unittest.TestCase):
         self.owner.login()
         self.owner.expect("200 SHARED")
         self.assertEqual(self.search(self.viewer, name),
-                         [self.expected_row(name, len(contents))])
+                         [self.expected_row(name)])
         self.viewer.send("download 1")
         self.viewer.expect("Downloaded " + name)
         self.assertEqual((self.viewer.directory / name).read_bytes(), contents)
@@ -103,19 +103,19 @@ class ClientServerIntegrationTests(unittest.TestCase):
         name, token = "missing peer %.bin", "missing%20peer%20%25.bin"
         _, port = self.advertised_peer(token, 1)
         self.assertEqual(self.search(self.viewer, name),
-                         [self.expected_row(name, 1, identity=90, port=port)])
+                         [self.expected_row(name, identity=90, port=port)])
         self.viewer.send("download 1")
         self.assertEqual(self.search(self.viewer, name),
-                         [self.expected_row(name, 1, identity=90, port=port)])
+                         [self.expected_row(name, identity=90, port=port)])
         self.assertIn("failed: CONNECT_FAILED", self.viewer.errors())
         self.assertFalse((self.viewer.directory / name).exists())
         self.assertEqual(list(self.viewer.directory.glob(".p2p-download-*")), [])
 
-    def test_search_preserves_full_uint64_metadata(self):
+    def test_search_accepts_maximum_file_size_without_displaying_it(self):
         maximum = 18446744073709551615
         _, port = self.advertised_peer("huge.bin", maximum)
         self.assertEqual(self.search(self.viewer, "huge.bin"),
-                         [self.expected_row("huge.bin", maximum, identity=90, port=port)])
+                         [self.expected_row("huge.bin", identity=90, port=port)])
         self.assertIsNone(self.viewer.process.poll())
         self.assertEqual(self.search(self.viewer, "absent.bin"), [])
 

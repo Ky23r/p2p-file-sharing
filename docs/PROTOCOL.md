@@ -75,7 +75,8 @@ Accounts persist across server restarts. Peer and share state is in memory.
 
 SHARE adds or updates the current connection's filename and size. UNSHARE
 removes only that connection's advertisement. SEARCH matches the complete
-filename, including case. Each result has the following fields.
+filename, including case. Each `FILE` response carries the advertised size in
+bytes for download validation.
 
 ```text
 FILE <filename> <size> <client_id> <IPv4> <port>
@@ -96,6 +97,16 @@ An empty search returns `200 END` on the first line. A rejected search returns
 its error code on the first line. The client consumes and validates the entire
 reply before it makes any result selectable. EOF before `200 END` discards
 the entire reply.
+
+In the terminal, `search my notes.txt` displays the decoded filename, client
+ID, IPv4 address, and port for each match. Each row starts with the number
+used by `download NUMBER`. The example above appears as follows.
+
+```text
+1: my notes.txt (client 12, 127.0.0.1:9001)
+2: my notes.txt (client 34, 127.0.0.1:9002)
+200 END
+```
 
 ## Peer transfer
 

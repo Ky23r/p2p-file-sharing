@@ -49,8 +49,9 @@ The client defaults to the local server, peer port `9001`, ID file
 The terminal hides passwords. With redirected input, put the password on the
 line after the account command. File arguments use the literal remainder of
 the line, so spaces work without quotes. Shared filenames are printable ASCII
-basenames. The client lists matches as numbered peers and prints `200 END`
-when the search is complete.
+basenames. Each numbered search result shows the filename, client ID, IP
+address, and port. Use the result number with `download NUMBER`. The client
+prints `200 END` when the search is complete.
 
 Local shares survive logout and restart. A failed download is displayed locally
 and its temporary file is removed. A completed download cannot overwrite an
@@ -59,9 +60,10 @@ echo, and joins the client workers.
 
 ## Protocol and storage
 
-Both control and peer headers use CRLF and three-digit replies. Search returns
-one `FILE` line per match and ends with `200 END`. The full command, status,
-storage, and transfer contracts are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+Both control and peer headers use CRLF and three-digit replies. The tracker
+sends one `FILE` line per search match with the advertised size for download
+validation, followed by `200 END`. The full command, status, storage, and
+transfer contracts are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 Account storage uses salted PBKDF2-HMAC-SHA256, private permissions, an
 exclusive lock, and a durable append before registration succeeds. Existing
