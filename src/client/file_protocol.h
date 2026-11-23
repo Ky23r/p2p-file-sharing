@@ -13,7 +13,12 @@
 #define FILE_NAME_TOKEN_CAP (PROTOCOL_FILENAME_TOKEN_MAX + 1U)
 #define FILE_PATH_CAP PATH_MAX
 #define FILE_TIMEOUT_SECONDS 30
-#define FILE_TRANSFER_BUFFER_SIZE 65536U
+#define FILE_CHUNK_MAX 65536U
+/* Longest peer line is GET with a fully escaped basename. Count bytes before LF. */
+#define FILE_PEER_LINE_MAX (sizeof("GET " CRLF) - 2U + PROTOCOL_FILENAME_TOKEN_MAX)
+#define FILE_TRANSFER_MODE "CHUNKED"
+#define FILE_DATA_TAG "<data>"
+#define FILE_END_TAG "<end>"
 
 typedef struct {
     uint32_t client_id;

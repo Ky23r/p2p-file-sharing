@@ -212,6 +212,24 @@ static void test_header_followed_by_binary_body(void)
     close(fds[1]);
 }
 
+static void test_bounded_line(void)
+{
+    int fds[2];
+    pair(fds);
+    net_reader reader;
+    net_reader_init(&reader, fds[1]);
+    const char wire[] = "abc\r\nabcd";
+    assert(send_all(fds[0], wire, sizeof(wire) - 1) == (ssize_t)sizeof(wire) - 1);
+    char *line = NULL;
+    size_t capacity = 0, length;
+    assert(recv_line_bounded(&reader, &line, &capacity, &length, 4) == NET_LINE_OK);
+    assert(length == 3 && strcmp(line, "abc") == 0);
+    assert(recv_line_bounded(&reader, &line, &capacity, &length, 3) == NET_LINE_TOO_LONG);
+    free(line);
+    close(fds[0]);
+    close(fds[1]);
+}
+
 int main(void)
 {
     test_lines();
@@ -220,6 +238,7 @@ int main(void)
     test_fragmentation_and_eintr();
     test_partial_send();
     test_header_followed_by_binary_body();
-    puts("net_io: 6 test groups passed (buffering, long lines, errors, EINTR, partial sends, binary body)");
+    test_bounded_line();
+    puts("net_io: 7 test groups passed (buffering, long lines, errors, EINTR, partial sends, binary body, line limit)");
     return 0;
 }

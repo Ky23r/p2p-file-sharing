@@ -46,7 +46,8 @@ class ClientServerIntegrationTests(unittest.TestCase):
 
     def test_two_clients_transfer_encoded_binary_and_empty_files(self):
         binary = bytes(range(256)) * 4097
-        for name, contents in (("report % +.bin", binary), ("empty +%.bin", b"")):
+        for name, contents in (("report % +.bin", binary), ("empty +%.bin", b""),
+                               ("two chunks.bin", binary[:2 * 65536])):
             with self.subTest(name=name):
                 self.share(name, contents)
                 self.assertEqual(self.search(self.viewer, name.split()[0]), [])

@@ -28,7 +28,7 @@ socket operations.
 
 | Status | Meaning |
 | --- | --- |
-| `200` | Command completed. `200 END` ends a successful search. The peer transfer header is `200 <size>`. |
+| `200` | Command completed. `200 END` ends a successful search. A peer transfer starts with `200 <size> CHUNKED`. |
 | `201` | Account created. |
 | `400` | Invalid framing, syntax, argument count, or argument value. |
 | `401` | Login required, or the supplied login credentials are invalid. Unknown users and wrong passwords receive the same reply. |
@@ -115,19 +115,48 @@ The downloader connects directly to the selected peer and sends
 active control session. A host that can reach the peer listener can request
 announced files, so use the service on a controlled network.
 
-A successful peer response starts with `200 <size>\r\n`, followed by exactly
-`size` raw bytes and a TCP close. An empty file has no body. Before the success
-header the uploader may return `400`, `404`, `409`, or `501` and close the
-connection. A failure during the body closes the connection. The downloader
-requires the advertised size and clean EOF. It reads the header and body through
-the same socket buffer and writes to a private temporary file. It publishes the
-complete file without overwriting an existing path and deletes the temporary
-file on failure.
+A successful peer response starts with `200 <size> CHUNKED\r\n`. The size
+must match the advertisement from SEARCH. `CHUNKED` identifies this peer
+format. Update both peers together to use it.
+
+| Frame header | Payload |
+| --- | --- |
+| `<data> <length>\r\n` | Exactly `length` bytes followed by another frame |
+| `<end> <length>\r\n` | Exactly `length` bytes that complete the file |
+
+The angle brackets in `<data>` and `<end>` are literal. Lengths are unsigned
+decimal byte counts up to 65536. A `<data>` frame carries at least one byte and
+leaves at least one byte for the final frame. An empty file has one
+`<end> 0\r\n` frame. Payload bytes immediately follow each header and can
+include any byte sequence, including CRLF and the frame tags. The next frame
+starts immediately after the preceding payload. Peer text lines are limited
+to 771 bytes including CRLF.
+
+For example, the following byte sequence sends the five bytes `abcde`.
+
+```text
+200 5 CHUNKED\r\n<data> 3\r\nabc<end> 2\r\nde
+```
+
+The downloader reads headers and payload through the same buffered reader.
+It writes only payload bytes to a private temporary file and accepts the
+transfer after reading a complete `<end>` frame with exactly the expected
+total size. The uploader closes after the last frame. The downloader finishes
+as soon as the final payload is complete and discards any subsequent bytes
+when closing the connection. EOF before the final frame is complete, invalid
+framing, or a size mismatch fails the download and deletes the temporary file.
+A completed download is published without overwriting an existing path.
+
+Before the success header the uploader may return `400`, `404`, `409`, or
+`501` and close the connection. On a read failure or a detected source change
+during the transfer, it closes without sending the final frame.
 
 The peer listener uses four upload workers and 30-second socket inactivity
 timeouts. Unshare, logout, or control failure disable new opens. An existing
-upload can finish. The transfer checks file type and size. Shared files must
-stay unchanged during transfers because the protocol carries no content hash.
+upload can finish. The uploader checks the opened file's type and advertised
+size. Before sending the final frame it checks the size, modification time, and
+status change time again. These metadata checks can detect source edits during
+upload. The protocol carries no content hash, so keep shared sources stable.
 
 ## Client and service state
 

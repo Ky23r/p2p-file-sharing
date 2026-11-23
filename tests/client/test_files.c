@@ -70,7 +70,9 @@ int main(void)
     size_t response_capacity = 0;
     size_t header_length;
     assert(recv_line(&reader, &response, &response_capacity, &header_length) == NET_LINE_OK);
-    assert(strcmp(response, "200 4") == 0);
+    assert(strcmp(response, "200 4 CHUNKED") == 0);
+    assert(recv_line(&reader, &response, &response_capacity, &header_length) == NET_LINE_OK);
+    assert(strcmp(response, "<end> 4") == 0);
     free(response);
     size_t received = 0;
     while (received < sizeof(body)) {

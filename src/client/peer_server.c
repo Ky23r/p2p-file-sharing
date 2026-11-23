@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define UPLOAD_WORKERS 4U
@@ -60,16 +61,63 @@ static void peer_error(int fd, const char *code)
     (void)send_all(fd, code, strlen(code));
 }
 
+static bool source_unchanged(int source, const struct stat *initial)
+{
+    struct stat current;
+    return fstat(source, &current) == 0 && current.st_size == initial->st_size &&
+           current.st_mtim.tv_sec == initial->st_mtim.tv_sec &&
+           current.st_mtim.tv_nsec == initial->st_mtim.tv_nsec &&
+           current.st_ctim.tv_sec == initial->st_ctim.tv_sec &&
+           current.st_ctim.tv_nsec == initial->st_ctim.tv_nsec;
+}
+
+static void send_file(int peer, int source, uint64_t size)
+{
+    struct stat initial;
+    if (fstat(source, &initial) != 0) {
+        peer_error(peer, STATUS_NOT_FOUND CRLF);
+        return;
+    }
+    if ((uint64_t)initial.st_size != size) {
+        peer_error(peer, STATUS_CONFLICT CRLF);
+        return;
+    }
+    char header[64];
+    int length = snprintf(header, sizeof(header), STATUS_OK " %" PRIu64 " " FILE_TRANSFER_MODE CRLF, size);
+    if (send_all(peer, header, (size_t)length) < 0)
+        return;
+
+    unsigned char buffer[FILE_CHUNK_MAX];
+    uint64_t remaining = size;
+    do {
+        size_t amount = remaining < sizeof(buffer) ? (size_t)remaining : sizeof(buffer);
+        ssize_t bytes;
+        do {
+            bytes = read(source, buffer, amount);
+        } while (bytes < 0 && errno == EINTR);
+        if (bytes < 0 || (bytes == 0 && amount != 0))
+            return;
+        remaining -= (uint64_t)bytes;
+        bool final = remaining == 0;
+        if (final && !source_unchanged(source, &initial))
+            return;
+        length = snprintf(header, sizeof(header), "%s %zd" CRLF,
+                          final ? FILE_END_TAG : FILE_DATA_TAG, bytes);
+        if (send_all(peer, header, (size_t)length) < 0 || send_all(peer, buffer, (size_t)bytes) < 0)
+            return;
+    } while (remaining != 0);
+}
+
 static void serve_file(int fd, SharedIndex *index)
 {
     net_reader reader;
     net_reader_init(&reader, fd);
     char *line = NULL;
     size_t capacity = 0, length;
-    int received = recv_line(&reader, &line, &capacity, &length);
+    int received = recv_line_bounded(&reader, &line, &capacity, &length, FILE_PEER_LINE_MAX);
     char *tokens[2], name[FILE_NAME_CAP];
     const char *error = NULL;
-    if (received == NET_LINE_INVALID ||
+    if (received == NET_LINE_INVALID || received == NET_LINE_TOO_LONG ||
         (received == NET_LINE_OK &&
          (protocol_tokens(line, length, tokens, 2) != 2 ||
           !protocol_decode_filename(tokens[1], name, sizeof(name)))))
@@ -89,21 +137,7 @@ static void serve_file(int fd, SharedIndex *index)
         peer_error(fd, errno == ESTALE ? STATUS_CONFLICT CRLF : STATUS_NOT_FOUND CRLF);
         return;
     }
-    char header[64];
-    int count = snprintf(header, sizeof(header), STATUS_OK " %" PRIu64 CRLF, size);
-    if (send_all(fd, header, (size_t)count) >= 0) {
-        unsigned char buffer[FILE_TRANSFER_BUFFER_SIZE];
-        uint64_t remaining = size;
-        while (remaining != 0) {
-            size_t amount = remaining < sizeof(buffer) ? (size_t)remaining : sizeof(buffer);
-            ssize_t bytes = read(source, buffer, amount);
-            if (bytes < 0 && errno == EINTR)
-                continue;
-            if (bytes <= 0 || send_all(fd, buffer, (size_t)bytes) < 0)
-                break;
-            remaining -= (uint64_t)bytes;
-        }
-    }
+    send_file(fd, source, size);
     close(source);
 }
 

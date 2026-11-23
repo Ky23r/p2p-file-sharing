@@ -41,6 +41,43 @@ static const char *receive_failure(void)
     return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT ? "TIMEOUT" : "TRANSFER_FAILED";
 }
 
+static const char *receive_line_failure(int status)
+{
+    if (status == NET_LINE_ERROR)
+        return receive_failure();
+    errno = EPROTO;
+    return "TRANSFER_FAILED";
+}
+
+static const char *receive_payload(net_reader *reader, int output, size_t length)
+{
+    unsigned char buffer[FILE_CHUNK_MAX];
+    size_t received = 0;
+    while (received < length) {
+        ssize_t count = net_read(reader, buffer + received, length - received);
+        if (count < 0)
+            return receive_failure();
+        if (count == 0) {
+            errno = ECONNRESET;
+            return "TRANSFER_FAILED";
+        }
+        received += (size_t)count;
+    }
+    size_t written = 0;
+    while (written < length) {
+        ssize_t count = write(output, buffer + written, length - written);
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count <= 0) {
+            if (count == 0)
+                errno = EIO;
+            return "LOCAL_ERROR";
+        }
+        written += (size_t)count;
+    }
+    return NULL;
+}
+
 const char *download_file(const FileSearchResult *result, const char *directory, ClientSignals *signals)
 {
     char token[FILE_NAME_TOKEN_CAP];
@@ -81,13 +118,11 @@ const char *download_file(const FileSearchResult *result, const char *directory,
     }
     net_reader reader;
     net_reader_init(&reader, peer);
-    char *tokens[2];
+    char *tokens[3];
     size_t header_length;
-    int status = recv_line(&reader, &header, &capacity, &header_length);
+    int status = recv_line_bounded(&reader, &header, &capacity, &header_length, FILE_PEER_LINE_MAX);
     if (status != NET_LINE_OK) {
-        failure = status == NET_LINE_ERROR ? receive_failure() : "TRANSFER_FAILED";
-        if (status != NET_LINE_ERROR)
-            errno = EPROTO;
+        failure = receive_line_failure(status);
         goto finish;
     }
     if (protocol_error(header, header_length)) {
@@ -103,8 +138,9 @@ const char *download_file(const FileSearchResult *result, const char *directory,
         goto finish;
     }
     uint64_t size;
-    if (protocol_tokens(header, header_length, tokens, 2) != 2 || strcmp(tokens[0], STATUS_OK) != 0 ||
-        !protocol_parse_uint64(tokens[1], UINT64_MAX, &size)) {
+    if (protocol_tokens(header, header_length, tokens, 3) != 3 || strcmp(tokens[0], STATUS_OK) != 0 ||
+        !protocol_parse_uint64(tokens[1], UINT64_MAX, &size) ||
+        strcmp(tokens[2], FILE_TRANSFER_MODE) != 0) {
         failure = "TRANSFER_FAILED";
         errno = EPROTO;
         goto finish;
@@ -114,36 +150,37 @@ const char *download_file(const FileSearchResult *result, const char *directory,
         errno = EPROTO;
         goto finish;
     }
-    unsigned char buffer[FILE_TRANSFER_BUFFER_SIZE];
     uint64_t remaining = size;
-    while (remaining != 0) {
-        size_t amount = remaining < sizeof(buffer) ? (size_t)remaining : sizeof(buffer);
-        ssize_t received = net_read(&reader, buffer, amount);
-        if (received <= 0) {
-            failure = received == 0 ? "TRANSFER_FAILED" : receive_failure();
-            if (received == 0)
-                errno = ECONNRESET;
+    for (;;) {
+        status = recv_line_bounded(&reader, &header, &capacity, &header_length, FILE_PEER_LINE_MAX);
+        if (status != NET_LINE_OK) {
+            failure = receive_line_failure(status);
             goto finish;
         }
-        size_t written = 0;
-        while (written < (size_t)received) {
-            ssize_t count = write(output, buffer + written, (size_t)received - written);
-            if (count < 0 && errno == EINTR)
-                continue;
-            if (count <= 0) {
-                failure = "LOCAL_ERROR";
-                goto finish;
-            }
-            written += (size_t)count;
-        }
-        remaining -= (uint64_t)received;
-    }
-    ssize_t extra = net_read(&reader, buffer, 1);
-    if (extra != 0) {
-        failure = extra > 0 ? "SIZE_MISMATCH" : receive_failure();
-        if (extra > 0)
+        uint64_t amount;
+        if (protocol_tokens(header, header_length, tokens, 2) != 2 ||
+            !protocol_parse_uint64(tokens[1], FILE_CHUNK_MAX, &amount)) {
+            failure = "TRANSFER_FAILED";
             errno = EPROTO;
-        goto finish;
+            goto finish;
+        }
+        bool final = strcmp(tokens[0], FILE_END_TAG) == 0;
+        if (!final && (strcmp(tokens[0], FILE_DATA_TAG) != 0 || amount == 0)) {
+            failure = "TRANSFER_FAILED";
+            errno = EPROTO;
+            goto finish;
+        }
+        if (final ? amount != remaining : amount >= remaining) {
+            failure = "SIZE_MISMATCH";
+            errno = EPROTO;
+            goto finish;
+        }
+        failure = receive_payload(&reader, output, (size_t)amount);
+        if (failure != NULL)
+            goto finish;
+        if (final)
+            break;
+        remaining -= amount;
     }
     failure = "LOCAL_ERROR";
     if (client_signals_number(signals) != 0)

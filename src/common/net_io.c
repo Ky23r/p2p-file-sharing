@@ -61,7 +61,8 @@ ssize_t net_read(net_reader *reader, void *buffer, size_t size)
     return count;
 }
 
-int recv_line(net_reader *reader, char **line, size_t *capacity, size_t *length)
+int recv_line_bounded(net_reader *reader, char **line, size_t *capacity, size_t *length,
+                      size_t max_bytes_before_lf)
 {
     size_t count = 0;
 
@@ -82,6 +83,8 @@ int recv_line(net_reader *reader, char **line, size_t *capacity, size_t *length)
         size_t available = reader->used - reader->next;
         const unsigned char *newline = memchr(start, '\n', available);
         size_t bytes = newline == NULL ? available : (size_t)(newline - start);
+        if (bytes > max_bytes_before_lf - count)
+            return NET_LINE_TOO_LONG;
         if (bytes >= SIZE_MAX - count) {
             errno = EOVERFLOW;
             return NET_LINE_ERROR;
@@ -109,4 +112,9 @@ int recv_line(net_reader *reader, char **line, size_t *capacity, size_t *length)
             return NET_LINE_OK;
         }
     }
+}
+
+int recv_line(net_reader *reader, char **line, size_t *capacity, size_t *length)
+{
+    return recv_line_bounded(reader, line, capacity, length, SIZE_MAX);
 }

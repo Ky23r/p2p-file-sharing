@@ -1,6 +1,8 @@
 """Exercise client behavior with controlled discovery replies and TCP peers."""
 
 import concurrent.futures
+import io
+import os
 from pathlib import Path
 import queue
 import socket
@@ -92,12 +94,18 @@ class Client:
             self.stderr.close()
 
 
+def single_frame_reply(contents):
+    return f"200 {len(contents)} CHUNKED\r\n<end> {len(contents)}\r\n".encode() + contents
+
+
 class PeerFixture:
     """A one-shot real TCP peer for adversarial transfer framing."""
 
-    def __init__(self, response, fragments=False):
+    def __init__(self, response, fragments=False, wait_for_client=False):
         self.response = response
         self.fragments = fragments
+        self.wait_for_client = wait_for_client
+        self.client_closed = threading.Event()
         self.listener = socket.socket()
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen(1)
@@ -120,6 +128,8 @@ class PeerFixture:
                         time.sleep(0.001)
                 else:
                     connection.sendall(self.response)
+                if self.wait_for_client and connection.recv(1) == b"":
+                    self.client_closed.set()
         except (ConnectionResetError, BrokenPipeError):
             pass  # Rejecting a bad header may close before the fixture finishes.
         except Exception as error:
@@ -168,16 +178,62 @@ class ClientFileTests(unittest.TestCase):
     def test_peer_upload_binary_empty_and_parallel_requests(self):
         uploader = self.client()
         uploader.login()
-        contents = bytes(range(256)) * 4097
+        contents = bytes(range(256)) * 4097 + b"<end> 0\r\n"
         self.share(uploader, "report +%.bin", contents)
         self.share(uploader, "empty", b"")
-        self.assertEqual(self.peer_get(uploader, "empty"), b"200 0\r\n")
+        self.assertEqual(self.peer_get(uploader, "empty"), single_frame_reply(b""))
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             responses = list(pool.map(lambda _: self.peer_get(uploader, "report +%.bin"), range(8)))
         for response in responses:
-            header, body = response.split(b"\r\n", 1)
-            self.assertEqual(header, f"200 {len(contents)}".encode())
-            self.assertEqual(body, contents)
+            stream = io.BytesIO(response)
+            self.assertEqual(stream.readline(), f"200 {len(contents)} CHUNKED\r\n".encode())
+            position = 0
+            while position < len(contents):
+                tag, length = stream.readline().split()
+                length = int(length)
+                self.assertGreater(length, 0)
+                self.assertLessEqual(length, 65536)
+                end = position + length
+                self.assertLessEqual(end, len(contents))
+                self.assertEqual(tag, b"<end>" if end == len(contents) else b"<data>")
+                self.assertEqual(stream.read(length), contents[position:end])
+                position = end
+            self.assertEqual(stream.read(), b"")
+
+    def test_upload_detects_source_changes_before_final_frame(self):
+        uploader = self.client()
+        uploader.login()
+        size = 16 * 1024 * 1024
+        for name, size_change in (("grown.bin", 1), ("truncated.bin", -1), ("edited.bin", 0)):
+            with self.subTest(name=name):
+                source = uploader.directory / name
+                with source.open("wb") as output:
+                    output.truncate(size)
+                # An in-place write must change mtime even on a coarse filesystem clock.
+                os.utime(source, (1, 1))
+                uploader.send("share " + name)
+                uploader.expect("200 SHARED")
+                with socket.socket() as peer, peer.makefile("rb") as stream:
+                    # The small receive window stalls this upload until we read its payload.
+                    peer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
+                    peer.settimeout(5)
+                    peer.connect(("127.0.0.1", uploader.peer_port))
+                    peer.sendall(f"GET {name}\r\n".encode())
+                    self.assertEqual(stream.readline(), f"200 {size} CHUNKED\r\n".encode())
+                    with source.open("r+b") as output:
+                        if size_change:
+                            output.truncate(size + size_change)
+                        else:
+                            output.write(b"x")
+                    received = 0
+                    while frame := stream.readline():
+                        tag, length = frame.split()
+                        self.assertEqual(tag, b"<data>")
+                        length = int(length)
+                        self.assertEqual(len(stream.read(length)), length)
+                        received += length
+                    self.assertGreater(received, 0)
+                    self.assertLess(received, size)
 
     def test_discovery_download_unshare_and_logout(self):
         uploader, downloader = self.client(), self.client()
@@ -221,13 +277,14 @@ class ClientFileTests(unittest.TestCase):
     def test_download_coalesced_header_binary_body_and_empty_file(self):
         client = self.client()
         client.login()
-        for contents, name in ((b"a\0\nb\xff", "file.bin"), (b"", "file.empty")):
-            peer = PeerFixture(f"200 {len(contents)}\r\n".encode() + contents)
+        for contents, name in ((b"a\0\nb\xff\r\n<end> 0\r\n", "file.bin"), (b"", "file.empty")):
+            peer = PeerFixture(single_frame_reply(contents), wait_for_client=True)
             self.addCleanup(peer.close)
             self.result(peer.port, len(contents), name)
             self.search(client, name)
             client.send("download 1")
             client.expect("Downloaded " + name)
+            self.assertTrue(peer.client_closed.wait(1))
             self.assertEqual((client.directory / name).read_bytes(), contents)
         self.assertEqual(list(client.directory.glob(".p2p-download-*")), [])
 
@@ -235,7 +292,9 @@ class ClientFileTests(unittest.TestCase):
         client = self.client()
         client.login()
         contents = bytes(range(256)) * 8
-        peer = PeerFixture(f"200 {len(contents)}\r\n".encode() + contents, fragments=True)
+        response = (f"200 {len(contents)} CHUNKED\r\n<data> 3\r\n".encode() + contents[:3] +
+                    f"<end> {len(contents) - 3}\r\n".encode() + contents[3:])
+        peer = PeerFixture(response, fragments=True)
         self.addCleanup(peer.close)
         self.result(peer.port, len(contents))
         self.search(client)
@@ -246,14 +305,24 @@ class ClientFileTests(unittest.TestCase):
     def test_remote_failures_remove_partial_downloads(self):
         client = self.client()
         client.login()
+        header = b"200 4 CHUNKED\r\n"
         cases = [
-            (b"200 4\r\nab", "TRANSFER_FAILED"),
-            (b"200 4\r\nabcde", "SIZE_MISMATCH"),
-            (b"200 3\r\nabc", "SIZE_MISMATCH"),
-            (b"200 4\x00ignored\r\nabcd", "TRANSFER_FAILED"),
-            (b"200 -4\r\n", "TRANSFER_FAILED"),
-            (b"200 18446744073709551616\r\n", "TRANSFER_FAILED"),
-            (b"200 4\nabcd", "TRANSFER_FAILED"),
+            (header + b"<data> 2\r\nab", "TRANSFER_FAILED"),
+            (header + b"<data> 2\r\nab<end> 2\r\nc", "TRANSFER_FAILED"),
+            (header + b"<data> 2\r\nab<end> 2\r", "TRANSFER_FAILED"),
+            (header + b"<end> 2\r\nab", "SIZE_MISMATCH"),
+            (header + b"<end> 5\r\nabcde", "SIZE_MISMATCH"),
+            (header + b"<data> 4\r\nabcd<end> 0\r\n", "SIZE_MISMATCH"),
+            (header + b"<data> 0\r\n", "TRANSFER_FAILED"),
+            (header + b"<data> 65537\r\n", "TRANSFER_FAILED"),
+            (header + b"<end> 4\nabcd", "TRANSFER_FAILED"),
+            (header + b"<end> 4\x00\r\nabcd", "TRANSFER_FAILED"),
+            (header + b"<unknown> 4\r\nabcd", "TRANSFER_FAILED"),
+            (header + b"x" * 4097, "TRANSFER_FAILED"),
+            (b"200 3 CHUNKED\r\n<end> 3\r\nabc", "SIZE_MISMATCH"),
+            (b"200 4\r\nabcd", "TRANSFER_FAILED"),
+            (b"200 -4 CHUNKED\r\n", "TRANSFER_FAILED"),
+            (b"200 18446744073709551616 CHUNKED\r\n", "TRANSFER_FAILED"),
             (b"404\r\n", "NOT_FOUND"),
             (b"409\r\n", "SIZE_MISMATCH"),
             (b"x" * 4097 + b"\r\n", "TRANSFER_FAILED"),
@@ -312,7 +381,7 @@ class ClientFileTests(unittest.TestCase):
         self.assertEqual(self.peer_get(client, "file.bin"), b"404\r\n")
         client.login()
         client.expect("200 SHARED")
-        self.assertEqual(self.peer_get(client, "file.bin"), b"200 4\r\ndata")
+        self.assertEqual(self.peer_get(client, "file.bin"), single_frame_reply(b"data"))
         client.close()
         deadline = time.monotonic() + 3
         while 1 in self.server.peers and time.monotonic() < deadline:
@@ -322,7 +391,7 @@ class ClientFileTests(unittest.TestCase):
         restarted.login()
         restarted.expect("200 SHARED")
         self.assertEqual((client.directory / "config.txt").read_bytes(), saved_id)
-        self.assertEqual(self.peer_get(restarted, "file.bin"), b"200 4\r\ndata")
+        self.assertEqual(self.peer_get(restarted, "file.bin"), single_frame_reply(b"data"))
 
     def test_pending_share_is_not_served_and_manual_hello_retries(self):
         client = self.client()
@@ -338,7 +407,7 @@ class ClientFileTests(unittest.TestCase):
         client.send("hello")
         client.expect("200 HELLO")
         client.expect("200 SHARED")
-        self.assertEqual(self.peer_get(client, "file.bin"), b"200 4\r\ndata")
+        self.assertEqual(self.peer_get(client, "file.bin"), single_frame_reply(b"data"))
 
     def test_upload_rejects_bad_requests_changed_missing_and_symlink_files(self):
         client = self.client()
@@ -414,7 +483,7 @@ class ClientFileTests(unittest.TestCase):
         self.assertGreaterEqual(hellos, 2)
         with self.server.lock:
             self.assertIn(b"file.bin", self.server.peers[1][2])
-        self.assertEqual(self.peer_get(client, "file.bin"), b"200 4\r\ndata")
+        self.assertEqual(self.peer_get(client, "file.bin"), single_frame_reply(b"data"))
 
     def test_rejected_keepalive_preserves_serving_and_automatic_retry(self):
         self.server.hello_responses = [b"200\r\n", b"500\r\n", b"200\r\n"]
@@ -435,12 +504,12 @@ class ClientFileTests(unittest.TestCase):
         await_hellos(2)
         client.send("shares")
         client.expect("SHARE file.bin 4 ANNOUNCED")
-        self.assertEqual(self.peer_get(client, "file.bin"), b"200 4\r\ndata")
+        self.assertEqual(self.peer_get(client, "file.bin"), single_frame_reply(b"data"))
         self.assertIn("500", client.errors())
         with self.server.lock:
             self.assertIn(b"file.bin", self.server.peers[1][2])
         await_hellos(3)
-        self.assertEqual(self.peer_get(client, "file.bin"), b"200 4\r\ndata")
+        self.assertEqual(self.peer_get(client, "file.bin"), single_frame_reply(b"data"))
 
     def test_quit_joins_workers_with_partial_requests(self):
         client = self.client()
@@ -459,7 +528,7 @@ class ClientFileTests(unittest.TestCase):
         self.server.logout_response = b"500\r\n"
         client.send("logout")
         client.expect("500")
-        self.assertEqual(self.peer_get(client, "file.bin"), b"200 4\r\ndata")
+        self.assertEqual(self.peer_get(client, "file.bin"), single_frame_reply(b"data"))
 
     def test_explicit_hello_withdraws_a_missing_previous_share(self):
         client = self.client()
@@ -525,7 +594,7 @@ class ClientFileTests(unittest.TestCase):
         self.addCleanup(restarted.close)
         restarted.login()
         restarted.expect("200 SHARED")
-        self.assertEqual(self.peer_get(restarted, "file.bin"), b"200 4\r\ndata")
+        self.assertEqual(self.peer_get(restarted, "file.bin"), single_frame_reply(b"data"))
 
     def test_failed_catalog_removal_disables_serving_and_warns_before_republish(self):
         client = self.client()

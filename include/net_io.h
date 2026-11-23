@@ -15,6 +15,7 @@ enum net_line_result {
     NET_LINE_ERROR = -1,       /* errno from recv, or EINVAL */
     NET_LINE_INVALID = -2,    /* bare LF; next line can still be read */
     NET_LINE_TRUNCATED = -3,  /* EOF during a line */
+    NET_LINE_TOO_LONG = -4,   /* line limit exceeded; close the stream */
     NET_LINE_EOF = 0,          /* EOF between lines */
     NET_LINE_OK = 1
 };
@@ -32,6 +33,10 @@ void net_reader_init(net_reader *reader, int fd);
  * Use the same reader for all reads on a connection.
  */
 int recv_line(net_reader *reader, char **line, size_t *capacity, size_t *length);
+
+/* Like recv_line, with a limit on bytes before LF (including the CR). */
+int recv_line_bounded(net_reader *reader, char **line, size_t *capacity, size_t *length,
+                      size_t max_bytes_before_lf);
 
 /* Read up to size binary bytes, consuming prefetched bytes first. Like recv:
  * positive byte count, 0 at EOF (or size == 0), -1/errno on failure. Retry EINTR.
