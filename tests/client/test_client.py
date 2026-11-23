@@ -2,7 +2,6 @@
 
 import concurrent.futures
 import io
-import os
 from pathlib import Path
 import queue
 import socket
@@ -95,7 +94,7 @@ class Client:
 
 
 def single_frame_reply(contents):
-    return f"200 {len(contents)} CHUNKED\r\n<end> {len(contents)}\r\n".encode() + contents
+    return f"200 CHUNKED\r\n<end> {len(contents)}\r\n".encode() + contents
 
 
 class PeerFixture:
@@ -186,7 +185,7 @@ class ClientFileTests(unittest.TestCase):
             responses = list(pool.map(lambda _: self.peer_get(uploader, "report +%.bin"), range(8)))
         for response in responses:
             stream = io.BytesIO(response)
-            self.assertEqual(stream.readline(), f"200 {len(contents)} CHUNKED\r\n".encode())
+            self.assertEqual(stream.readline(), b"200 CHUNKED\r\n")
             position = 0
             while position < len(contents):
                 tag, length = stream.readline().split()
@@ -200,17 +199,15 @@ class ClientFileTests(unittest.TestCase):
                 position = end
             self.assertEqual(stream.read(), b"")
 
-    def test_upload_detects_source_changes_before_final_frame(self):
+    def test_upload_ends_at_source_eof_after_changes(self):
         uploader = self.client()
         uploader.login()
         size = 16 * 1024 * 1024
-        for name, size_change in (("grown.bin", 1), ("truncated.bin", -1), ("edited.bin", 0)):
+        for name, size_change in (("grown.bin", 4096), ("truncated.bin", -4096), ("edited.bin", 0)):
             with self.subTest(name=name):
                 source = uploader.directory / name
                 with source.open("wb") as output:
                     output.truncate(size)
-                # An in-place write must change mtime even on a coarse filesystem clock.
-                os.utime(source, (1, 1))
                 uploader.send("share " + name)
                 uploader.expect("200 SHARED")
                 with socket.socket() as peer, peer.makefile("rb") as stream:
@@ -219,21 +216,26 @@ class ClientFileTests(unittest.TestCase):
                     peer.settimeout(5)
                     peer.connect(("127.0.0.1", uploader.peer_port))
                     peer.sendall(f"GET {name}\r\n".encode())
-                    self.assertEqual(stream.readline(), f"200 {size} CHUNKED\r\n".encode())
+                    self.assertEqual(stream.readline(), b"200 CHUNKED\r\n")
                     with source.open("r+b") as output:
-                        if size_change:
+                        if size_change < 0:
                             output.truncate(size + size_change)
                         else:
-                            output.write(b"x")
+                            output.seek(size if size_change else size - 4096)
+                            output.write(b"x" * 4096)
+                    expected_size = size + size_change
                     received = 0
-                    while frame := stream.readline():
-                        tag, length = frame.split()
-                        self.assertEqual(tag, b"<data>")
-                        length = int(length)
-                        self.assertEqual(len(stream.read(length)), length)
-                        received += length
-                    self.assertGreater(received, 0)
-                    self.assertLess(received, size)
+                    with source.open("rb") as expected:
+                        while received < expected_size:
+                            tag, length = stream.readline().split()
+                            length = int(length)
+                            self.assertGreater(length, 0)
+                            self.assertLessEqual(length, 65536)
+                            received += length
+                            self.assertLessEqual(received, expected_size)
+                            self.assertEqual(tag, b"<end>" if received == expected_size else b"<data>")
+                            self.assertEqual(stream.read(length), expected.read(length))
+                    self.assertEqual(stream.read(1), b"")
 
     def test_discovery_download_unshare_and_logout(self):
         uploader, downloader = self.client(), self.client()
@@ -274,13 +276,13 @@ class ClientFileTests(unittest.TestCase):
         row, = client.search_results()
         self.assertIn("1:", row)
 
-    def test_download_coalesced_header_binary_body_and_empty_file(self):
+    def test_download_coalesced_frames_with_stale_advertised_size(self):
         client = self.client()
         client.login()
         for contents, name in ((b"a\0\nb\xff\r\n<end> 0\r\n", "file.bin"), (b"", "file.empty")):
             peer = PeerFixture(single_frame_reply(contents), wait_for_client=True)
             self.addCleanup(peer.close)
-            self.result(peer.port, len(contents), name)
+            self.result(peer.port, 1, name)
             self.search(client, name)
             client.send("download 1")
             client.expect("Downloaded " + name)
@@ -292,7 +294,7 @@ class ClientFileTests(unittest.TestCase):
         client = self.client()
         client.login()
         contents = bytes(range(256)) * 8
-        response = (f"200 {len(contents)} CHUNKED\r\n<data> 3\r\n".encode() + contents[:3] +
+        response = (b"200 CHUNKED\r\n<data> 3\r\n" + contents[:3] +
                     f"<end> {len(contents) - 3}\r\n".encode() + contents[3:])
         peer = PeerFixture(response, fragments=True)
         self.addCleanup(peer.close)
@@ -305,26 +307,22 @@ class ClientFileTests(unittest.TestCase):
     def test_remote_failures_remove_partial_downloads(self):
         client = self.client()
         client.login()
-        header = b"200 4 CHUNKED\r\n"
+        header = b"200 CHUNKED\r\n"
         cases = [
             (header + b"<data> 2\r\nab", "TRANSFER_FAILED"),
             (header + b"<data> 2\r\nab<end> 2\r\nc", "TRANSFER_FAILED"),
             (header + b"<data> 2\r\nab<end> 2\r", "TRANSFER_FAILED"),
-            (header + b"<end> 2\r\nab", "SIZE_MISMATCH"),
-            (header + b"<end> 5\r\nabcde", "SIZE_MISMATCH"),
-            (header + b"<data> 4\r\nabcd<end> 0\r\n", "SIZE_MISMATCH"),
+            (header + b"<data> 4\r\nabcd", "TRANSFER_FAILED"),
             (header + b"<data> 0\r\n", "TRANSFER_FAILED"),
             (header + b"<data> 65537\r\n", "TRANSFER_FAILED"),
             (header + b"<end> 4\nabcd", "TRANSFER_FAILED"),
             (header + b"<end> 4\x00\r\nabcd", "TRANSFER_FAILED"),
             (header + b"<unknown> 4\r\nabcd", "TRANSFER_FAILED"),
             (header + b"x" * 4097, "TRANSFER_FAILED"),
-            (b"200 3 CHUNKED\r\n<end> 3\r\nabc", "SIZE_MISMATCH"),
+            (b"200 3 CHUNKED\r\n<end> 3\r\nabc", "TRANSFER_FAILED"),
             (b"200 4\r\nabcd", "TRANSFER_FAILED"),
-            (b"200 -4 CHUNKED\r\n", "TRANSFER_FAILED"),
-            (b"200 18446744073709551616 CHUNKED\r\n", "TRANSFER_FAILED"),
+            (b"200 CHUNKED extra\r\n", "TRANSFER_FAILED"),
             (b"404\r\n", "NOT_FOUND"),
-            (b"409\r\n", "SIZE_MISMATCH"),
             (b"x" * 4097 + b"\r\n", "TRANSFER_FAILED"),
         ]
         for response, reason in cases:
@@ -409,7 +407,7 @@ class ClientFileTests(unittest.TestCase):
         client.expect("200 SHARED")
         self.assertEqual(self.peer_get(client, "file.bin"), single_frame_reply(b"data"))
 
-    def test_upload_rejects_bad_requests_changed_missing_and_symlink_files(self):
+    def test_upload_serves_changed_source_and_rejects_invalid_requests_and_paths(self):
         client = self.client()
         client.login()
         self.share(client, "file.bin", b"data")
@@ -419,7 +417,7 @@ class ClientFileTests(unittest.TestCase):
         self.assertEqual(self.peer_get(client, "file.bin", b"PUT file.bin\r\n"), b"501\r\n")
         source = client.directory / "file.bin"
         source.write_bytes(b"changed size")
-        self.assertEqual(self.peer_get(client, "file.bin"), b"409\r\n")
+        self.assertEqual(self.peer_get(client, "file.bin"), single_frame_reply(b"changed size"))
         source.unlink()
         self.assertEqual(self.peer_get(client, "file.bin"), b"404\r\n")
         outside = self.directory / "outside"

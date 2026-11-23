@@ -24,7 +24,6 @@ typedef struct {
     uint32_t client_id;
     char ip[16];
     uint16_t port;
-    uint64_t size;
     char name[FILE_NAME_CAP];
 } FileSearchResult;
 

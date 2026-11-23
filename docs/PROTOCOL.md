@@ -28,13 +28,13 @@ socket operations.
 
 | Status | Meaning |
 | --- | --- |
-| `200` | Command completed. `200 END` ends a successful search. A peer transfer starts with `200 <size> CHUNKED`. |
+| `200` | Command completed. `200 END` ends a successful search. A peer transfer starts with `200 CHUNKED`. |
 | `201` | Account created. |
 | `400` | Invalid framing, syntax, argument count, or argument value. |
 | `401` | Login required, or the supplied login credentials are invalid. Unknown users and wrong passwords receive the same reply. |
 | `403` | Complete HELLO before issuing file commands. |
 | `404` | UNSHARE could not find an advertisement owned by this connection, or the requested peer file is unavailable. |
-| `409` | Conflict. The account already exists, the connection is already logged in, another connection holds the client ID, or an advertised peer file changed size. |
+| `409` | Conflict. The account already exists, the connection is already logged in, or another connection holds the client ID. |
 | `500` | Internal failure, such as an account storage, hashing, or allocation error while processing the request. |
 | `501` | Unrecognized command in a syntactically valid request. |
 | `503` | The server could not start a session or worker and closes the connection. |
@@ -75,8 +75,9 @@ Accounts persist across server restarts. Peer and share state is in memory.
 
 SHARE adds or updates the current connection's filename and size. UNSHARE
 removes only that connection's advertisement. SEARCH matches the complete
-filename, including case. Each `FILE` response carries the advertised size in
-bytes for download validation.
+filename, including case. Each `FILE` response carries the size in bytes
+recorded at announcement. The actual download size is the sum of its payloads
+through the final frame.
 
 ```text
 FILE <filename> <size> <client_id> <IPv4> <port>
@@ -115,9 +116,9 @@ The downloader connects directly to the selected peer and sends
 active control session. A host that can reach the peer listener can request
 announced files, so use the service on a controlled network.
 
-A successful peer response starts with `200 <size> CHUNKED\r\n`. The size
-must match the advertisement from SEARCH. `CHUNKED` identifies this peer
-format. Update both peers together to use it.
+A successful peer response starts with `200 CHUNKED\r\n`. The length of the
+transfer is determined as the uploader reads the file. Update both peers
+together to use this format.
 
 | Frame header | Payload |
 | --- | --- |
@@ -125,38 +126,44 @@ format. Update both peers together to use it.
 | `<end> <length>\r\n` | Exactly `length` bytes that complete the file |
 
 The angle brackets in `<data>` and `<end>` are literal. Lengths are unsigned
-decimal byte counts up to 65536. A `<data>` frame carries at least one byte and
-leaves at least one byte for the final frame. An empty file has one
-`<end> 0\r\n` frame. Payload bytes immediately follow each header and can
-include any byte sequence, including CRLF and the frame tags. The next frame
-starts immediately after the preceding payload. Peer text lines are limited
-to 771 bytes including CRLF.
+decimal byte counts up to 65536. A `<data>` frame carries at least one byte.
+An empty file has one `<end> 0\r\n` frame. Payload bytes immediately follow
+each header and can include any byte sequence, including CRLF and the frame
+tags. The next frame starts immediately after the preceding payload. Peer
+text lines are limited to 771 bytes including CRLF.
 
 For example, the following byte sequence sends the five bytes `abcde`.
 
 ```text
-200 5 CHUNKED\r\n<data> 3\r\nabc<end> 2\r\nde
+200 CHUNKED\r\n<data> 3\r\nabc<end> 2\r\nde
 ```
 
 The downloader reads headers and payload through the same buffered reader.
 It writes only payload bytes to a private temporary file and accepts the
-transfer after reading a complete `<end>` frame with exactly the expected
-total size. The uploader closes after the last frame. The downloader finishes
-as soon as the final payload is complete and discards any subsequent bytes
-when closing the connection. EOF before the final frame is complete, invalid
-framing, or a size mismatch fails the download and deletes the temporary file.
-A completed download is published without overwriting an existing path.
+transfer after reading a complete `<end>` frame. The uploader closes after the
+last frame. The downloader finishes as soon as the final payload is complete
+and discards any subsequent bytes when closing the connection. Socket EOF
+before the final frame is complete or invalid framing fails the download and
+deletes the temporary file. A completed download is published without
+overwriting an existing path.
 
-Before the success header the uploader may return `400`, `404`, `409`, or
-`501` and close the connection. On a read failure or a detected source change
-during the transfer, it closes without sending the final frame.
+Before the success header the uploader may return `400`, `404`, or `501`
+and close the connection. A source read failure closes the connection before
+the final frame.
 
 The peer listener uses four upload workers and 30-second socket inactivity
 timeouts. Unshare, logout, or control failure disable new opens. An existing
-upload can finish. The uploader checks the opened file's type and advertised
-size. Before sending the final frame it checks the size, modification time, and
-status change time again. These metadata checks can detect source edits during
-upload. The protocol carries no content hash, so keep shared sources stable.
+upload can finish. The uploader reads an open regular file in order and marks
+its last chunk when a read reaches EOF. Bytes appended before that EOF can be
+included. Truncation can bring EOF forward. The stream retains bytes already
+read, including when the source later overwrites or removes them. Keep the
+source stable when a consistent snapshot is required.
+
+The framing uses per-chunk lengths and an explicit terminator, as in HTTP/1.1
+chunked transfer coding. The final frame can also carry payload, as in FTP
+block mode with an EOF flag.
+[RFC 9112 §7.1](https://www.rfc-editor.org/rfc/rfc9112.html#section-7.1) ·
+[RFC 959 §3.4.2](https://www.rfc-editor.org/rfc/rfc959.html#page-22)
 
 ## Client and service state
 

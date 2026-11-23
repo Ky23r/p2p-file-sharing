@@ -385,18 +385,17 @@ void client_shares(ClientSession *client)
 static bool parse_result(char *line, size_t length, FileSearchResult *result)
 {
     char *tokens[6];
-    uint64_t id, port, size;
+    uint64_t id, port, advertised_size;
     struct in_addr address;
     if (protocol_tokens(line, length, tokens, 6) != 6 || strcmp(tokens[0], "FILE") != 0 ||
         !protocol_decode_filename(tokens[1], result->name, sizeof(result->name)) ||
-        !protocol_parse_uint64(tokens[2], UINT64_MAX, &size) ||
+        !protocol_parse_uint64(tokens[2], UINT64_MAX, &advertised_size) ||
         !protocol_parse_uint64(tokens[3], UINT32_MAX, &id) ||
         strlen(tokens[4]) >= sizeof(result->ip) || inet_pton(AF_INET, tokens[4], &address) != 1 ||
         !protocol_parse_uint64(tokens[5], UINT16_MAX, &port) || port == 0)
         return false;
     result->client_id = (uint32_t)id;
     result->port = (uint16_t)port;
-    result->size = size;
     strcpy(result->ip, tokens[4]);
     return true;
 }

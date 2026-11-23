@@ -116,7 +116,7 @@ class StalledPeer:
                         raise AssertionError("Client closed without a complete GET request")
                     request.extend(block)
                 self.request = bytes(request)
-                connection.sendall(b"200 10 CHUNKED\r\n<data> 3\r\nabc<end> 7\r\n")
+                connection.sendall(b"200 CHUNKED\r\n<data> 3\r\nabc<end> 7\r\n")
                 self.sent.set()
                 self.stop.wait()
         except Exception as error:

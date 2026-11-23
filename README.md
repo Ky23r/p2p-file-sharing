@@ -61,11 +61,11 @@ echo, and joins the client workers.
 ## Protocol and storage
 
 Both control and peer headers use CRLF and three-digit replies. The tracker
-sends one `FILE` line per search match with the advertised size for download
-validation, followed by `200 END`. Peers send binary payload in
+sends one `FILE` line per search match with the size recorded at announcement,
+followed by `200 END`. Peers read up to the source's EOF and send the bytes in
 length-prefixed `<data>` frames and a final `<end>` frame. The downloader
-checks the total size and requires the complete final frame before publishing
-the file. Both peers need the updated client for this transfer format.
+publishes the bytes it received once the final frame is complete. Both peers
+need the updated client for this transfer format.
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the full contract.
 
 Account storage uses salted PBKDF2-HMAC-SHA256, private permissions, an

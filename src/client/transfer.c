@@ -118,7 +118,7 @@ const char *download_file(const FileSearchResult *result, const char *directory,
     }
     net_reader reader;
     net_reader_init(&reader, peer);
-    char *tokens[3];
+    char *tokens[2];
     size_t header_length;
     int status = recv_line_bounded(&reader, &header, &capacity, &header_length, FILE_PEER_LINE_MAX);
     if (status != NET_LINE_OK) {
@@ -130,27 +130,17 @@ const char *download_file(const FileSearchResult *result, const char *directory,
         if (strcmp(header, STATUS_NOT_FOUND) == 0) {
             failure = "NOT_FOUND";
             errno = ENOENT;
-        } else if (strcmp(header, STATUS_CONFLICT) == 0) {
-            failure = "SIZE_MISMATCH";
         } else {
             failure = "TRANSFER_FAILED";
         }
         goto finish;
     }
-    uint64_t size;
-    if (protocol_tokens(header, header_length, tokens, 3) != 3 || strcmp(tokens[0], STATUS_OK) != 0 ||
-        !protocol_parse_uint64(tokens[1], UINT64_MAX, &size) ||
-        strcmp(tokens[2], FILE_TRANSFER_MODE) != 0) {
+    if (protocol_tokens(header, header_length, tokens, 2) != 2 || strcmp(tokens[0], STATUS_OK) != 0 ||
+        strcmp(tokens[1], FILE_TRANSFER_MODE) != 0) {
         failure = "TRANSFER_FAILED";
         errno = EPROTO;
         goto finish;
     }
-    if (size != result->size) {
-        failure = "SIZE_MISMATCH";
-        errno = EPROTO;
-        goto finish;
-    }
-    uint64_t remaining = size;
     for (;;) {
         status = recv_line_bounded(&reader, &header, &capacity, &header_length, FILE_PEER_LINE_MAX);
         if (status != NET_LINE_OK) {
@@ -170,17 +160,11 @@ const char *download_file(const FileSearchResult *result, const char *directory,
             errno = EPROTO;
             goto finish;
         }
-        if (final ? amount != remaining : amount >= remaining) {
-            failure = "SIZE_MISMATCH";
-            errno = EPROTO;
-            goto finish;
-        }
         failure = receive_payload(&reader, output, (size_t)amount);
         if (failure != NULL)
             goto finish;
         if (final)
             break;
-        remaining -= amount;
     }
     failure = "LOCAL_ERROR";
     if (client_signals_number(signals) != 0)

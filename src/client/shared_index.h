@@ -42,13 +42,13 @@ void shared_index_set_online(SharedIndex *index, bool online);
  */
 void shared_index_mark(SharedIndex *index, const char *name, bool announced, uint64_t size);
 /* Open a regular source without following its final symlink. Return caller-owned
- * fd or -1/errno. size is valid only on success.
+ * fd or -1/errno. Optional size output is valid only on success.
  */
 int shared_file_open(const char *path, uint64_t *size);
-/* Require online/announced state and unchanged advertised size. Authorization
+/* Require online/announced state. Authorization
  * and opening are atomic with logout/unshare; fd remains usable afterward.
- * Returns caller-owned fd or -1/errno (ESTALE for changed size).
+ * Returns caller-owned fd or -1/errno.
  */
-int shared_index_open(SharedIndex *index, const char *name, uint64_t *size);
+int shared_index_open(SharedIndex *index, const char *name);
 
 #endif

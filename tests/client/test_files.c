@@ -27,7 +27,6 @@ int main(void)
     assert(!file_name_decode("610062", decoded));
     assert(!file_name_decode("61FF", decoded));
     assert(!file_name_decode("1b", decoded));
-    uint64_t number;
 
     char directory[] = "/tmp/p2p-files-XXXXXX";
     assert(mkdtemp(directory) != NULL);
@@ -47,11 +46,11 @@ int main(void)
     SharedFile entry;
     assert(shared_index_get(index, 0, &entry));
     assert(entry.size == 4 && !entry.announced);
-    assert(shared_index_open(index, name, &number) < 0);
+    assert(shared_index_open(index, name) < 0);
     shared_index_set_online(index, true);
     shared_index_mark(index, name, true, 4);
-    fd = shared_index_open(index, name, &number);
-    assert(fd >= 0 && number == 4);
+    fd = shared_index_open(index, name);
+    assert(fd >= 0);
     close(fd);
     int listener = open_peer_listener(0);
     assert(listener >= 0);
@@ -70,7 +69,7 @@ int main(void)
     size_t response_capacity = 0;
     size_t header_length;
     assert(recv_line(&reader, &response, &response_capacity, &header_length) == NET_LINE_OK);
-    assert(strcmp(response, "200 4 CHUNKED") == 0);
+    assert(strcmp(response, "200 CHUNKED") == 0);
     assert(recv_line(&reader, &response, &response_capacity, &header_length) == NET_LINE_OK);
     assert(strcmp(response, "<end> 4") == 0);
     free(response);
@@ -88,7 +87,7 @@ int main(void)
     snprintf(destination, sizeof(destination), "%s/%s", downloads, name);
     assert(mkdir(downloads, 0700) == 0);
     FileSearchResult result = {.client_id = 7, .ip = "127.0.0.1",
-                               .port = ntohs(address.sin_port), .size = 4};
+                               .port = ntohs(address.sin_port)};
     strcpy(result.name, name);
     assert(download_file(&result, downloads, NULL) == NULL);
     struct stat downloaded;
@@ -98,9 +97,14 @@ int main(void)
     close(fd);
     assert(strcmp(download_file(&result, downloads, NULL), "LOCAL_ERROR") == 0 && errno == EEXIST);
     assert(unlink(destination) == 0);
-    result.size = 3;
-    assert(strcmp(download_file(&result, downloads, NULL), "SIZE_MISMATCH") == 0);
-    assert(access(destination, F_OK) < 0 && errno == ENOENT);
+    fd = open(source, O_WRONLY | O_TRUNC);
+    assert(fd >= 0 && write(fd, "new", 3) == 3);
+    close(fd);
+    assert(download_file(&result, downloads, NULL) == NULL);
+    fd = open(destination, O_RDONLY);
+    assert(fd >= 0 && read(fd, body, sizeof(body)) == 3 && memcmp(body, "new", 3) == 0);
+    close(fd);
+    assert(unlink(destination) == 0);
     assert(rmdir(downloads) == 0); /* No partial temporary download remains. */
     peer = file_connect("127.0.0.1", ntohs(address.sin_port), NULL);
     assert(peer >= 0); /* Stop must also interrupt a stalled request. */
@@ -108,7 +112,7 @@ int main(void)
     close(peer);
     close(listener);
     shared_index_set_online(index, false);
-    assert(shared_index_open(index, name, &number) < 0);
+    assert(shared_index_open(index, name) < 0);
     shared_index_destroy(index);
 
     index = shared_index_load(catalog);

@@ -4,7 +4,6 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <inttypes.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
@@ -12,7 +11,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #define UPLOAD_WORKERS 4U
@@ -61,51 +59,42 @@ static void peer_error(int fd, const char *code)
     (void)send_all(fd, code, strlen(code));
 }
 
-static bool source_unchanged(int source, const struct stat *initial)
+static ssize_t read_chunk(int source, unsigned char buffer[FILE_CHUNK_MAX])
 {
-    struct stat current;
-    return fstat(source, &current) == 0 && current.st_size == initial->st_size &&
-           current.st_mtim.tv_sec == initial->st_mtim.tv_sec &&
-           current.st_mtim.tv_nsec == initial->st_mtim.tv_nsec &&
-           current.st_ctim.tv_sec == initial->st_ctim.tv_sec &&
-           current.st_ctim.tv_nsec == initial->st_ctim.tv_nsec;
+    ssize_t count;
+    do {
+        count = read(source, buffer, FILE_CHUNK_MAX);
+    } while (count < 0 && errno == EINTR);
+    return count;
 }
 
-static void send_file(int peer, int source, uint64_t size)
+static void send_file(int peer, int source)
 {
-    struct stat initial;
-    if (fstat(source, &initial) != 0) {
-        peer_error(peer, STATUS_NOT_FOUND CRLF);
-        return;
-    }
-    if ((uint64_t)initial.st_size != size) {
-        peer_error(peer, STATUS_CONFLICT CRLF);
-        return;
-    }
-    char header[64];
-    int length = snprintf(header, sizeof(header), STATUS_OK " %" PRIu64 " " FILE_TRANSFER_MODE CRLF, size);
-    if (send_all(peer, header, (size_t)length) < 0)
+    const char response[] = STATUS_OK " " FILE_TRANSFER_MODE CRLF;
+    if (send_all(peer, response, sizeof(response) - 1) < 0)
         return;
 
-    unsigned char buffer[FILE_CHUNK_MAX];
-    uint64_t remaining = size;
-    do {
-        size_t amount = remaining < sizeof(buffer) ? (size_t)remaining : sizeof(buffer);
-        ssize_t bytes;
-        do {
-            bytes = read(source, buffer, amount);
-        } while (bytes < 0 && errno == EINTR);
-        if (bytes < 0 || (bytes == 0 && amount != 0))
+    /* Read one chunk ahead to mark the last payload using the source's EOF. */
+    unsigned char chunks[2][FILE_CHUNK_MAX];
+    size_t current = 0;
+    ssize_t bytes = read_chunk(source, chunks[current]);
+    if (bytes < 0)
+        return;
+    for (;;) {
+        size_t next = 1 - current;
+        ssize_t following = bytes == 0 ? 0 : read_chunk(source, chunks[next]);
+        if (following < 0)
             return;
-        remaining -= (uint64_t)bytes;
-        bool final = remaining == 0;
-        if (final && !source_unchanged(source, &initial))
-            return;
-        length = snprintf(header, sizeof(header), "%s %zd" CRLF,
+        bool final = following == 0;
+        char header[32];
+        int length = snprintf(header, sizeof(header), "%s %zd" CRLF,
                           final ? FILE_END_TAG : FILE_DATA_TAG, bytes);
-        if (send_all(peer, header, (size_t)length) < 0 || send_all(peer, buffer, (size_t)bytes) < 0)
+        if (send_all(peer, header, (size_t)length) < 0 ||
+            send_all(peer, chunks[current], (size_t)bytes) < 0 || final)
             return;
-    } while (remaining != 0);
+        current = next;
+        bytes = following;
+    }
 }
 
 static void serve_file(int fd, SharedIndex *index)
@@ -131,13 +120,12 @@ static void serve_file(int fd, SharedIndex *index)
     }
     if (received != NET_LINE_OK)
         return;
-    uint64_t size;
-    int source = shared_index_open(index, name, &size);
+    int source = shared_index_open(index, name);
     if (source < 0) {
-        peer_error(fd, errno == ESTALE ? STATUS_CONFLICT CRLF : STATUS_NOT_FOUND CRLF);
+        peer_error(fd, STATUS_NOT_FOUND CRLF);
         return;
     }
-    send_file(fd, source, size);
+    send_file(fd, source);
     close(source);
 }
 

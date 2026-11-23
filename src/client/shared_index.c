@@ -53,7 +53,8 @@ int shared_file_open(const char *path, uint64_t *size)
         return -1;
     struct stat info;
     if (fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_size >= 0) {
-        *size = (uint64_t)info.st_size;
+        if (size != NULL)
+            *size = (uint64_t)info.st_size;
         return fd;
     }
     close(fd);
@@ -312,20 +313,14 @@ void shared_index_mark(SharedIndex *index, const char *name, bool announced, uin
     pthread_mutex_unlock(&index->mutex);
 }
 
-int shared_index_open(SharedIndex *index, const char *name, uint64_t *size)
+int shared_index_open(SharedIndex *index, const char *name)
 {
     pthread_mutex_lock(&index->mutex);
     size_t position = find_entry(index, name);
     int fd = -1;
     errno = EACCES;
-    if (index->online && position < index->count && index->entries[position].announced) {
-        fd = shared_file_open(index->entries[position].path, size);
-        if (fd >= 0 && *size != index->entries[position].size) {
-            close(fd);
-            fd = -1;
-            errno = ESTALE;
-        }
-    }
+    if (index->online && position < index->count && index->entries[position].announced)
+        fd = shared_file_open(index->entries[position].path, NULL);
     pthread_mutex_unlock(&index->mutex);
     return fd;
 }
