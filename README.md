@@ -31,44 +31,55 @@ and local state. Create the download directories before starting the clients.
 The client defaults to the local server, peer port `9001`, ID file
 `config.txt`, catalog `index.txt`, and download directory `.`. Use
 `--server IPv4` and `--port PORT` to choose the control endpoint.
+The client generates a random 32-bit ID on first run and sends it with its
+listening port when it connects. Login activates that announcement and
+publishes saved shares.
 
-| Command | Action |
+| Terminal command | Action |
 | --- | --- |
 | `register USER` | Create an account |
-| `login USER` | Log in and announce the peer listener |
-| `hello` | Retry the peer announcement and reannounce shares |
-| `logout` | End the session and release the client ID |
-| `share PATH` | Save a local file to the catalog and advertise it when online |
+| `login USER` | Log in and publish saved shares |
+| `hello` | Refresh the peer announcement and retry saved shares |
+| `logout` | Log out and release the client ID |
+| `share PATH` | Save a local file and advertise it when logged in |
 | `unshare NAME` | Remove an advertisement and its local catalog entry |
 | `shares` | List local files as pending or announced |
 | `search NAME` | Find peers that share the exact filename |
-| `download NUMBER` | Download a numbered result from the latest search |
+| `download NUMBER` | Download a result from the latest search |
 | `help` | Show commands |
 | `quit` | Close the connection and exit |
 
 The terminal hides passwords. With redirected input, put the password on the
 line after the account command. File arguments use the literal remainder of
-the line, so spaces work without quotes. Shared filenames are printable ASCII
-basenames. Each numbered search result shows the filename, client ID, IP
+the line, so spaces work without quotes. Filenames may contain non-ASCII
+characters. Each numbered search result shows the filename, client ID, IP
 address, and port. Use the result number with `download NUMBER`. The client
-prints `200 END` when the search is complete.
+prints `200 OK` when the search is complete. Terminal commands use lowercase.
+`help` and `quit` are local to the client. Both executables support `--help`.
 
-Local shares survive logout and restart. A failed download is displayed locally
-and its temporary file is removed. A completed download cannot overwrite an
-existing path. Ctrl+C or SIGTERM stops a pending download, restores terminal
-echo, and joins the client workers.
+Local shares survive logout and restart. The client prints download failures,
+removes partial files, and reports peer failures to the server. The server
+withdraws the affected advertisement when the peer reports that a shared file
+is unavailable or has changed size. Connection and transfer errors are recorded
+for diagnosis. A completed download cannot overwrite an existing path. Ctrl+C
+or SIGTERM stops a pending download, restores terminal echo, and joins the
+client workers.
 
 ## Protocol and storage
 
-Both control and peer headers use CRLF and three-digit replies. The tracker
-sends one `FILE` line per search match with the advertised size for download
-validation, followed by `200 END`. The full command, status, storage, and
-transfer contracts are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+Both channels use CRLF and case-insensitive command verbs. Replies begin with
+a three-digit numeric code. Search sends one `200-` continuation per result
+and ends with `200 OK`. Peer downloads start with `200 <size>` followed by the
+raw file bytes. The conventions follow the command and reply patterns of
+[FTP, RFC 959](https://www.rfc-editor.org/rfc/rfc959.html) and
+[SMTP, RFC 5321](https://www.rfc-editor.org/rfc/rfc5321.html). Upgrade the client
+and server together when switching wire formats. The full contract is in
+[docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 Account storage uses salted PBKDF2-HMAC-SHA256, private permissions, an
 exclusive lock, and a durable append before registration succeeds. Existing
 account records and local catalogs retain their format. The server logs
-connection activity and successful account, announcement, and file operations.
+connection activity, request outcomes, and download failure reports.
 The peer registry and file index live in memory. The server copies search
 matches under a mutex and sends them after releasing the lock.
 
@@ -89,8 +100,10 @@ poll-based socket and terminal handling in HW7.
 
 `make test` runs C socket, protocol, and file tests alongside Python TCP
 integration tests. The cases include fragmented CRLF, pipelined requests, long
-input, empty and interrupted searches, concurrent sessions and index updates,
-restart and storage failure, exact binary transfers, and signal cleanup.
+input, mixed-case verbs, malformed replies, empty and interrupted multiline
+searches, concurrent sessions and index updates,
+restart and storage failure, exact binary transfers, stale advertisement
+withdrawal, and signal cleanup.
 
 An AddressSanitizer and UndefinedBehaviorSanitizer build uses the same suite.
 

@@ -67,7 +67,7 @@ class InteractiveClient:
         self.send("login alice")
         self.expect(b"Password: ")
         self.send("LocalTest!42")
-        self.expect(b"200\r\n")
+        self.expect(b"200 OK\r\n")
         self.expect(b"200 HELLO\r\n")
         self.expect(b"p2p> ")
 
@@ -165,9 +165,9 @@ class ClientSignalTests(unittest.TestCase):
         self.addCleanup(peer.close)
         filename = "cancelled.bin"
         self.server.search_response = (
-            f"FILE {filename} 10 90 127.0.0.1 {peer.port}\r\n200 END\r\n".encode())
+            f"200-{filename} 10 90 127.0.0.1 {peer.port} 1\r\n200 OK\r\n".encode())
         client.send("search " + filename)
-        client.expect(b"200 END\r\n")
+        client.expect(b"200 OK\r\n")
         client.expect(b"p2p> ")
         client.send("download 1")
         self.assertTrue(peer.sent.wait(timeout=3), f"Peer never sent a partial body: {peer.error!r}")

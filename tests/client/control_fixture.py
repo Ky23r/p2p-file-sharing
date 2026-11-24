@@ -15,8 +15,8 @@ class ControlFixture:
         self.peers = {}
         self.requests = []
         self.search_response = None
-        self.share_response = b"200\r\n"
-        self.logout_response = b"200\r\n"
+        self.share_response = b"200 OK\r\n"
+        self.logout_response = b"200 OK\r\n"
         self.close_after_search = False
         self.hello_responses = []
         fixture = self
@@ -24,6 +24,7 @@ class ControlFixture:
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
                 authenticated = False
+                staged = None
                 identity = None
                 shares = {}
                 try:
@@ -32,28 +33,35 @@ class ControlFixture:
                         if not line:
                             break
                         if not line.endswith(b"\r\n"):
-                            self.wfile.write(b"400\r\n")
+                            self.wfile.write(b"500 Invalid or unknown command\r\n")
                             continue
                         fields = line[:-2].split(b" ")
-                        command, args = fields[0], fields[1:]
-                        response = b"400\r\n"
+                        command, args = fields[0].upper(), fields[1:]
+                        response = b"501 Invalid arguments\r\n"
                         with fixture.lock:
                             fixture.requests.append(line)
                             if command == b"REGISTER" and len(args) == 2:
-                                response = b"201\r\n"
+                                response = b"200 OK\r\n"
                             elif command == b"LOGIN" and len(args) == 2:
-                                authenticated = True
-                                response = b"200\r\n"
-                            elif not authenticated:
-                                response = b"401\r\n"
+                                if staged is not None and staged[0] in fixture.peers:
+                                    response = b"550 Client ID in use\r\n"
+                                else:
+                                    authenticated = True
+                                    identity = staged
+                                    if identity is not None:
+                                        fixture.peers[identity[0]] = (self, identity, shares)
+                                    response = b"200 OK\r\n"
                             elif command == b"HELLO" and len(args) == 2:
                                 candidate = (int(args[0]), self.client_address[0], int(args[1]))
                                 holder = fixture.peers.get(candidate[0])
-                                override = fixture.hello_responses.pop(0) if fixture.hello_responses else b"200\r\n"
-                                if override != b"200\r\n":
+                                override = fixture.hello_responses.pop(0) if fixture.hello_responses else b"200 OK\r\n"
+                                if override != b"200 OK\r\n":
                                     response = override
+                                elif not authenticated:
+                                    staged = candidate
+                                    response = b"200 OK\r\n"
                                 elif holder is not None and holder[0] is not self:
-                                    response = b"409\r\n"
+                                    response = b"550 Client ID in use\r\n"
                                 else:
                                     if identity is None or candidate[0] != identity[0]:
                                         if identity is not None:
@@ -61,26 +69,29 @@ class ControlFixture:
                                         shares.clear()
                                     identity = candidate
                                     fixture.peers[identity[0]] = (self, identity, shares)
-                                    response = b"200\r\n"
+                                    response = b"200 OK\r\n"
+                            elif not authenticated:
+                                response = b"530 Not logged in\r\n"
                             elif command == b"LOGOUT" and not args:
                                 response = fixture.logout_response
-                                if response == b"200\r\n":
+                                if response == b"200 OK\r\n":
                                     if identity is not None:
                                         fixture.peers.pop(identity[0], None)
                                     identity, authenticated = None, False
+                                    staged = None
                                     shares.clear()
                             elif identity is None:
-                                response = b"403\r\n"
-                            elif command == b"SHARE" and len(args) == 2:
-                                response = fixture.share_response
-                                if response == b"200\r\n":
-                                    shares[args[0]] = int(args[1])
+                                response = b"503 Bad command sequence\r\n"
+                            elif command == b"SHARE" and len(args) == 3:
+                                response = fixture.share_response if int(args[0]) == identity[0] else b"550 Client ID does not match session\r\n"
+                                if response == b"200 OK\r\n":
+                                    shares[args[1]] = int(args[2])
                             elif command == b"UNSHARE" and len(args) == 1:
                                 if args[0] in shares:
                                     del shares[args[0]]
-                                    response = b"200\r\n"
+                                    response = b"200 OK\r\n"
                                 else:
-                                    response = b"404\r\n"
+                                    response = b"550 File not shared\r\n"
                             elif command == b"SEARCH" and len(args) == 1:
                                 if fixture.search_response is not None:
                                     response = fixture.search_response
@@ -89,10 +100,12 @@ class ControlFixture:
                                     rows = []
                                     for _, peer, files in fixture.peers.values():
                                         if name in files:
-                                            row = b"FILE " + name + f" {files[name]} {peer[0]} {peer[1]} {peer[2]}\r\n".encode()
+                                            row = b"200-" + name + f" {files[name]} {peer[0]} {peer[1]} {peer[2]} 1\r\n".encode()
                                             rows.append((peer[0], row))
                                     rows.sort()
-                                    response = b"".join(row for _, row in rows) + b"200 END\r\n"
+                                    response = b"".join(row for _, row in rows) + b"200 OK\r\n"
+                            elif command == b"REPORT" and len(args) == 4:
+                                response = b"200 OK\r\n"
                         self.wfile.write(response)
                         self.wfile.flush()
                         if command == b"SEARCH" and fixture.close_after_search:

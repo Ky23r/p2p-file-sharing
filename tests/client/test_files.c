@@ -88,16 +88,16 @@ int main(void)
     FileSearchResult result = {.client_id = 7, .ip = "127.0.0.1",
                                .port = ntohs(address.sin_port), .size = 4};
     strcpy(result.name, name);
-    assert(download_file(&result, downloads, NULL) == NULL);
+    assert(download_file(&result, downloads, NULL) == DOWNLOAD_OK);
     struct stat downloaded;
     assert(stat(destination, &downloaded) == 0 && (downloaded.st_mode & 0777) == 0600);
     fd = open(destination, O_RDONLY);
     assert(fd >= 0 && read(fd, body, sizeof(body)) == 4 && memcmp(body, "x\0\ny", 4) == 0);
     close(fd);
-    assert(strcmp(download_file(&result, downloads, NULL), "LOCAL_ERROR") == 0 && errno == EEXIST);
+    assert(download_file(&result, downloads, NULL) == DOWNLOAD_LOCAL_ERROR && errno == EEXIST);
     assert(unlink(destination) == 0);
     result.size = 3;
-    assert(strcmp(download_file(&result, downloads, NULL), "SIZE_MISMATCH") == 0);
+    assert(download_file(&result, downloads, NULL) == DOWNLOAD_SIZE_MISMATCH);
     assert(access(destination, F_OK) < 0 && errno == ENOENT);
     assert(rmdir(downloads) == 0); /* No partial temporary download remains. */
     peer = file_connect("127.0.0.1", ntohs(address.sin_port), NULL);

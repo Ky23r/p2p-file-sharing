@@ -26,13 +26,16 @@ ClientSession *client_session_start(int fd, uint32_t id, uint16_t port,
  */
 void client_session_stop(ClientSession *client);
 
-/* request includes LF; expected excludes LF. One complete exchange; validates
- * success exactly and accepts well-formed numeric error codes as recoverable rejections.
+/* Stage the client ID and listening port before reading terminal commands. */
+enum request_result client_stage_hello(ClientSession *client);
+/* The request is a complete REGISTER or LOGIN line, including CRLF. The
+ * request buffer is wiped before a successful login republishes saved shares.
  */
-enum request_result client_exchange(ClientSession *client, const char *request, const char *expected);
+enum request_result client_account(ClientSession *client, char *request, size_t capacity,
+                                   bool registering);
 
-/* Announce peer and republish readable local shares. Individual SHARE rejections
- * leave those entries pending; a rejected HELLO preserves the prior state.
+/* Stage or refresh the announcement. When logged in, republish readable shares.
+ * Individual SHARE rejections leave those entries pending.
  */
 enum request_result client_hello(ClientSession *client);
 /* Acknowledged logout or terminal control failure revokes serving/results;

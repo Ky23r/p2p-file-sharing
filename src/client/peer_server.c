@@ -69,13 +69,16 @@ static void serve_file(int fd, SharedIndex *index)
     int received = recv_line(&reader, &line, &capacity, &length);
     char *tokens[2], name[FILE_NAME_CAP];
     const char *error = NULL;
-    if (received == NET_LINE_INVALID ||
-        (received == NET_LINE_OK &&
-         (protocol_tokens(line, length, tokens, 2) != 2 ||
-          !protocol_decode_filename(tokens[1], name, sizeof(name)))))
-        error = STATUS_BAD_REQUEST CRLF;
-    else if (received == NET_LINE_OK && strcmp(tokens[0], "GET") != 0)
-        error = STATUS_UNKNOWN_COMMAND CRLF;
+    if (received == NET_LINE_INVALID) {
+        error = REPLY_INVALID_COMMAND CRLF;
+    } else if (received == NET_LINE_OK) {
+        const char *command = protocol_command(line, length);
+        if (command == NULL || strcmp(command, CMD_GET) != 0)
+            error = REPLY_INVALID_COMMAND CRLF;
+        else if (protocol_tokens(line, length, tokens, 2) != 2 ||
+                 !protocol_decode_filename(tokens[1], name, sizeof(name)))
+            error = REPLY_INVALID_ARGUMENTS CRLF;
+    }
     free(line);
     if (error != NULL) {
         peer_error(fd, error);
@@ -86,7 +89,24 @@ static void serve_file(int fd, SharedIndex *index)
     uint64_t size;
     int source = shared_index_open(index, name, &size);
     if (source < 0) {
-        peer_error(fd, errno == ESTALE ? STATUS_CONFLICT CRLF : STATUS_NOT_FOUND CRLF);
+        switch (errno) {
+        case ENODATA:
+            peer_error(fd, REPLY_FILE_NOT_SHARED CRLF);
+            break;
+        case ESTALE:
+            peer_error(fd, REPLY_FILE_SIZE_CHANGED CRLF);
+            break;
+        case ENOENT:
+        case ENOTDIR:
+        case ELOOP:
+        case EINVAL:
+        case EACCES:
+            peer_error(fd, REPLY_FILE_UNAVAILABLE CRLF);
+            break;
+        default:
+            peer_error(fd, REPLY_TEMPORARY_FILE_ERROR CRLF);
+            break;
+        }
         return;
     }
     char header[64];

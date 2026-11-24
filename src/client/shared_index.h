@@ -47,7 +47,8 @@ void shared_index_mark(SharedIndex *index, const char *name, bool announced, uin
 int shared_file_open(const char *path, uint64_t *size);
 /* Require online/announced state and unchanged advertised size. Authorization
  * and opening are atomic with logout/unshare; fd remains usable afterward.
- * Returns caller-owned fd or -1/errno (ESTALE for changed size).
+ * Returns caller-owned fd or -1/errno (ENODATA for an inactive share, ESTALE
+ * for a changed size, or the source open error).
  */
 int shared_index_open(SharedIndex *index, const char *name, uint64_t *size);
 

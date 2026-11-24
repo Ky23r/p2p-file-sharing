@@ -3,6 +3,44 @@
 #include <limits.h>
 #include <string.h>
 
+static bool printable_ascii(const char *text, size_t length)
+{
+    for (size_t i = 0; i < length; ++i) {
+        unsigned char byte = (unsigned char)text[i];
+        if (byte < 0x20 || byte > 0x7e)
+            return false;
+    }
+    return true;
+}
+
+const char *protocol_command(const char *line, size_t length)
+{
+    static const char *const commands[] = {
+        CMD_REGISTER, CMD_LOGIN, CMD_HELLO, CMD_LOGOUT, CMD_SHARE,
+        CMD_UNSHARE, CMD_SEARCH, CMD_REPORT, CMD_GET
+    };
+    if (!printable_ascii(line, length))
+        return NULL;
+    const char *space = memchr(line, ' ', length);
+    size_t verb_length = space == NULL ? length : (size_t)(space - line);
+    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
+        const char *command = commands[i];
+        if (strlen(command) != verb_length)
+            continue;
+        size_t j = 0;
+        for (; j < verb_length; ++j) {
+            char letter = line[j];
+            if (letter >= 'a' && letter <= 'z')
+                letter -= 'a' - 'A';
+            if (letter != command[j])
+                break;
+        }
+        if (j == verb_length)
+            return command;
+    }
+    return NULL;
+}
+
 size_t protocol_tokens(char *line, size_t length, char **tokens, size_t capacity)
 {
     if (length == 0 || capacity == 0 || line[0] == ' ' || line[length - 1] == ' ')
@@ -24,11 +62,23 @@ size_t protocol_tokens(char *line, size_t length, char **tokens, size_t capacity
     return count;
 }
 
+static bool final_reply(const char *line, size_t length)
+{
+    return length >= 5 && line[0] >= '1' && line[0] <= '5' &&
+           line[1] >= '0' && line[1] <= '9' &&
+           line[2] >= '0' && line[2] <= '9' &&
+           line[3] == ' ' && line[4] != ' ' && line[length - 1] != ' ' &&
+           printable_ascii(line + 4, length - 4);
+}
+
+bool protocol_reply_is(const char *line, size_t length, const char *code)
+{
+    return final_reply(line, length) && memcmp(line, code, 3) == 0;
+}
+
 bool protocol_error(const char *line, size_t length)
 {
-    return length == 3 && (line[0] == '4' || line[0] == '5') &&
-           line[1] >= '0' && line[1] <= '9' &&
-           line[2] >= '0' && line[2] <= '9';
+    return final_reply(line, length) && (line[0] == '4' || line[0] == '5');
 }
 
 bool protocol_valid_username(const char *username)
@@ -73,7 +123,7 @@ static bool unreserved(unsigned char c)
 
 static bool filename_byte(unsigned char c)
 {
-    return c >= 0x20 && c <= 0x7e && c != '/' && c != '\\';
+    return c >= 0x20 && c != 0x7f && c != '/' && c != '\\';
 }
 
 static int hex_value(unsigned char c)
@@ -85,19 +135,25 @@ static int hex_value(unsigned char c)
     return -1;
 }
 
+bool protocol_valid_filename(const char *name)
+{
+    if (name == NULL || *name == '\0' || strlen(name) > PROTOCOL_FILENAME_MAX ||
+        strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+        return false;
+    for (const unsigned char *byte = (const unsigned char *)name; *byte != '\0'; ++byte)
+        if (!filename_byte(*byte))
+            return false;
+    return true;
+}
+
 bool protocol_encode_filename(const char *name, char *token, size_t capacity)
 {
     static const char hex[] = "0123456789ABCDEF";
-    if (name == NULL || token == NULL || capacity == 0)
+    if (token == NULL || capacity == 0 || !protocol_valid_filename(name))
         return false;
-    size_t length = strlen(name), used = 0;
-    if (length == 0 || length > PROTOCOL_FILENAME_MAX ||
-        strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
-        return false;
-    for (size_t i = 0; i < length; ++i) {
-        unsigned char c = (unsigned char)name[i];
-        if (!filename_byte(c))
-            return false;
+    size_t used = 0;
+    for (const unsigned char *byte = (const unsigned char *)name; *byte != '\0'; ++byte) {
+        unsigned char c = *byte;
         size_t width = unreserved(c) ? 1U : 3U;
         if (width >= capacity - used)
             return false;

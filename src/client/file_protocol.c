@@ -49,22 +49,9 @@ bool file_hex_decode(const char *encoded, char *text, size_t capacity)
     return true;
 }
 
-bool file_name_valid(const char *name)
-{
-    size_t length = strlen(name);
-    if (length == 0 || length >= FILE_NAME_CAP || strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
-        return false;
-    for (size_t i = 0; i < length; ++i) {
-        unsigned char byte = (unsigned char)name[i];
-        if (byte < 0x20 || byte == 0x7f || byte == '/' || byte == '\\')
-            return false;
-    }
-    return true;
-}
-
 bool file_name_decode(const char *encoded, char name[FILE_NAME_CAP])
 {
-    return file_hex_decode(encoded, name, FILE_NAME_CAP) && file_name_valid(name);
+    return file_hex_decode(encoded, name, FILE_NAME_CAP) && protocol_valid_filename(name);
 }
 
 int file_socket_timeout(int fd)

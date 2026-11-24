@@ -53,7 +53,7 @@ class Client:
 
     def search_results(self):
         rows = []
-        while (line := self.lines.get(timeout=8)) != "200 END":
+        while (line := self.lines.get(timeout=8)) != "200 OK":
             if line is None:
                 raise AssertionError(self.errors())
             rows.append(line)
@@ -65,7 +65,7 @@ class Client:
 
     def login(self):
         self.send("login alice\nLocalTest!42")
-        self.expect("200")
+        self.expect("200 OK")
         self.expect("200 HELLO")
 
     def close(self):
@@ -165,6 +165,26 @@ class ClientFileTests(unittest.TestCase):
                     return bytes(response)
                 response.extend(block)
 
+    def test_startup_announcement_and_local_commands(self):
+        client = self.client()
+        process_help = subprocess.check_output([str(BINARY), "--help"], text=True).splitlines()
+        start = next(i for i, line in enumerate(process_help) if line.startswith("register USER"))
+        commands = process_help[start:]
+        self.assertEqual([line.split()[0] for line in commands],
+                         ["register", "login", "hello", "logout", "share", "unshare",
+                          "shares", "search", "download", "help", "quit"])
+        client.send("help")
+        for line in commands:
+            client.expect(line)
+        client.login()
+        self.share(client, "file.bin", b"data")
+        client.send("quit")
+        self.assertEqual(client.process.wait(timeout=5), 0)
+        with self.server.lock:
+            self.assertEqual(self.server.requests,
+                             [f"HELLO 1 {client.peer_port}\r\n".encode(),
+                              b"LOGIN alice LocalTest!42\r\n", b"SHARE 1 file.bin 4\r\n"])
+
     def test_peer_upload_binary_empty_and_parallel_requests(self):
         uploader = self.client()
         uploader.login()
@@ -195,7 +215,7 @@ class ClientFileTests(unittest.TestCase):
         uploader.expect("200 UNSHARED")
         downloader.send("search report.bin")
         self.assertEqual(downloader.search_results(), [])
-        self.assertEqual(self.peer_get(uploader, "report.bin"), b"404\r\n")
+        self.assertEqual(self.peer_get(uploader, "report.bin"), b"550 File not shared\r\n")
         uploader.send("logout")
         uploader.expect("200 LOGGED_OUT")
 
@@ -210,8 +230,8 @@ class ClientFileTests(unittest.TestCase):
         self.assertIn("control connection failed", client.errors())
 
     def result(self, peer_port, size, name="file.bin", identity=90):
-        self.server.search_response = (f"FILE {filename_token(name)} {size} "
-                                       f"{identity} 127.0.0.1 {peer_port}\r\n200 END\r\n").encode()
+        self.server.search_response = (f"200-{filename_token(name)} {size} "
+                                       f"{identity} 127.0.0.1 {peer_port} 1\r\n200 OK\r\n").encode()
 
     def search(self, client, query="file.bin"):
         client.send("search " + query)
@@ -254,8 +274,12 @@ class ClientFileTests(unittest.TestCase):
             (b"200 -4\r\n", "TRANSFER_FAILED"),
             (b"200 18446744073709551616\r\n", "TRANSFER_FAILED"),
             (b"200 4\nabcd", "TRANSFER_FAILED"),
-            (b"404\r\n", "NOT_FOUND"),
-            (b"409\r\n", "SIZE_MISMATCH"),
+            (b"550 File not shared\r\n", "NOT_FOUND"),
+            (b"550 File unavailable\r\n", "NOT_FOUND"),
+            (b"550 File size changed\r\n", "SIZE_MISMATCH"),
+            (b"450 File temporarily unavailable\r\n", "TRANSFER_FAILED"),
+            (b"550 Other rejection\r\n", "TRANSFER_FAILED"),
+            (b"550\r\n", "TRANSFER_FAILED"),
             (b"x" * 4097 + b"\r\n", "TRANSFER_FAILED"),
         ]
         for response, reason in cases:
@@ -309,7 +333,7 @@ class ClientFileTests(unittest.TestCase):
         saved_id = (client.directory / "config.txt").read_bytes()
         client.send("logout")
         client.expect("200 LOGGED_OUT")
-        self.assertEqual(self.peer_get(client, "file.bin"), b"404\r\n")
+        self.assertEqual(self.peer_get(client, "file.bin"), b"550 File not shared\r\n")
         client.login()
         client.expect("200 SHARED")
         self.assertEqual(self.peer_get(client, "file.bin"), b"200 4\r\ndata")
@@ -329,12 +353,12 @@ class ClientFileTests(unittest.TestCase):
         (client.directory / "file.bin").write_bytes(b"data")
         client.send("share file.bin")
         client.expect("Saved file.bin")
-        self.assertEqual(self.peer_get(client, "file.bin"), b"404\r\n")
-        self.server.share_response = b"500\r\n"
+        self.assertEqual(self.peer_get(client, "file.bin"), b"550 File not shared\r\n")
+        self.server.share_response = b"451 Local processing error\r\n"
         client.login()
-        client.expect("500")
-        self.assertEqual(self.peer_get(client, "file.bin"), b"404\r\n")
-        self.server.share_response = b"200\r\n"
+        client.expect("451 Local processing error")
+        self.assertEqual(self.peer_get(client, "file.bin"), b"550 File not shared\r\n")
+        self.server.share_response = b"200 OK\r\n"
         client.send("hello")
         client.expect("200 HELLO")
         client.expect("200 SHARED")
@@ -344,31 +368,37 @@ class ClientFileTests(unittest.TestCase):
         client = self.client()
         client.login()
         self.share(client, "file.bin", b"data")
+        self.assertEqual(self.peer_get(client, "file.bin", b"gEt file.bin\r\n"), b"200 4\r\ndata")
         for request in (b"GET ..\r\n", b"GET a%2Fb\r\n", b"GET %00\r\n", b"GET %66ile.bin\r\n",
-                        b"GET  file.bin\r\n", b"GET file.bin\n", b"GET\x00 x\r\n"):
-            self.assertEqual(self.peer_get(client, "file.bin", request), b"400\r\n")
-        self.assertEqual(self.peer_get(client, "file.bin", b"PUT file.bin\r\n"), b"501\r\n")
+                        b"GET  file.bin\r\n", b"GET\r\n"):
+            self.assertEqual(self.peer_get(client, "file.bin", request), b"501 Invalid arguments\r\n")
+        for request in (b"GET file.bin\n", b"GET\x00 x\r\n", b"PUT file.bin\r\n",
+                        b"PUT a b c d e\r\n", b"SEARCH file.bin\r\n"):
+            self.assertEqual(self.peer_get(client, "file.bin", request), b"500 Invalid or unknown command\r\n")
         source = client.directory / "file.bin"
         source.write_bytes(b"changed size")
-        self.assertEqual(self.peer_get(client, "file.bin"), b"409\r\n")
+        self.assertEqual(self.peer_get(client, "file.bin"), b"550 File size changed\r\n")
         source.unlink()
-        self.assertEqual(self.peer_get(client, "file.bin"), b"404\r\n")
+        self.assertEqual(self.peer_get(client, "file.bin"), b"550 File unavailable\r\n")
         outside = self.directory / "outside"
         outside.write_bytes(b"secret")
         source.symlink_to(outside)
-        self.assertEqual(self.peer_get(client, "file.bin"), b"404\r\n")
+        self.assertEqual(self.peer_get(client, "file.bin"), b"550 File unavailable\r\n")
 
     def test_invalid_search_results_close_control_and_disable_serving(self):
-        row = b"FILE file.bin 4 90 127.0.0.1 9001\r\n"
-        end = b"200 END\r\n"
-        responses = [b"200\r\n", b"200 END\n", b"200 END\x00bad\r\n",
+        row = b"200-file.bin 4 90 127.0.0.1 9001 1\r\n"
+        end = b"200 OK\r\n"
+        responses = [b"200\r\n", b"200 OK\n", b"200 OK\x00bad\r\n",
+                     b"200-\r\n" + end, b"200- file.bin 4 90 127.0.0.1 9001 1\r\n" + end,
+                     row.replace(b"200-", b"250-") + end, row + b"250 OK\r\n",
                      row + row + end, row + row.replace(b" 90 ", b" 9 ") + end,
                      row.replace(b"127.0.0.1", b"999.1.1.1") + end,
                      row.replace(b"9001", b"0") + end,
+                     row.replace(b"9001 1", b"9001 0") + end,
                      row.replace(b"file.bin", b"..") + end,
                      row.replace(b"file.bin", b"file.bin.backup") + end,
                      row.replace(b" 4 ", b" 18446744073709551616 ") + end,
-                     row + b"500\r\n"]
+                     row + b"451 Local processing error\r\n"]
         for response in responses:
             with self.subTest(response=response):
                 client = self.client()
@@ -382,18 +412,36 @@ class ClientFileTests(unittest.TestCase):
     def test_truncated_search_result_is_not_available_for_download(self):
         client = self.client()
         client.login()
-        self.server.search_response = b"FILE file.bin 4 90 127.0.0.1 9001\r\n"
+        self.server.search_response = b"200-file.bin 4 90 127.0.0.1 9001 1\r\n"
         self.server.close_after_search = True
         client.send("search file.bin")
         client.expect(None)
         self.assertEqual(client.process.wait(timeout=5), 1)
+
+    def test_terminal_search_error_preserves_control_session(self):
+        client = self.client()
+        client.login()
+        self.server.search_response = b"503 Bad command sequence\r\n"
+        client.send("search file.bin")
+        client.expect("503 Bad command sequence")
+        self.server.search_response = b"200 Search complete\r\n"
+        client.send("search file.bin")
+        self.assertEqual(client.search_results(), [])
+
+    def test_service_unavailable_is_terminal(self):
+        self.server.hello_responses = [b"421 Service unavailable\r\n"]
+        client = self.client()
+        client.expect("421 Service unavailable")
+        client.expect(None)
+        self.assertEqual(client.process.wait(timeout=5), 1)
+        self.assertNotIn("Invalid response", client.errors())
 
     def test_zero_results_clear_the_previous_download_selection(self):
         client = self.client()
         client.login()
         self.result(free_port(), 4)
         self.search(client)
-        self.server.search_response = b"200 END\r\n"
+        self.server.search_response = b"200 OK\r\n"
         client.send("search missing")
         self.assertEqual(client.search_results(), [])
         client.send("download 1\nlogout")
@@ -417,7 +465,7 @@ class ClientFileTests(unittest.TestCase):
         self.assertEqual(self.peer_get(client, "file.bin"), b"200 4\r\ndata")
 
     def test_rejected_keepalive_preserves_serving_and_automatic_retry(self):
-        self.server.hello_responses = [b"200\r\n", b"500\r\n", b"200\r\n"]
+        self.server.hello_responses = [b"200 OK\r\n", b"451 Local processing error\r\n", b"200 OK\r\n"]
         client = self.client()
         client.login()
         self.share(client, "file.bin", b"data")
@@ -436,7 +484,7 @@ class ClientFileTests(unittest.TestCase):
         client.send("shares")
         client.expect("SHARE file.bin 4 ANNOUNCED")
         self.assertEqual(self.peer_get(client, "file.bin"), b"200 4\r\ndata")
-        self.assertIn("500", client.errors())
+        self.assertIn("451 Local processing error", client.errors())
         with self.server.lock:
             self.assertIn(b"file.bin", self.server.peers[1][2])
         await_hellos(3)
@@ -456,9 +504,9 @@ class ClientFileTests(unittest.TestCase):
         client = self.client()
         client.login()
         self.share(client, "file.bin", b"data")
-        self.server.logout_response = b"500\r\n"
+        self.server.logout_response = b"451 Local processing error\r\n"
         client.send("logout")
-        client.expect("500")
+        client.expect("451 Local processing error")
         self.assertEqual(self.peer_get(client, "file.bin"), b"200 4\r\ndata")
 
     def test_explicit_hello_withdraws_a_missing_previous_share(self):
@@ -488,8 +536,8 @@ class ClientFileTests(unittest.TestCase):
     def test_search_accepts_more_than_128_results(self):
         client = self.client()
         client.login()
-        rows = "".join(f"FILE file.bin 4 {identity} 127.0.0.1 9001\r\n" for identity in range(1, 141))
-        self.server.search_response = (rows + "200 END\r\n").encode()
+        rows = "".join(f"200-file.bin 4 {identity} 127.0.0.1 9001 1\r\n" for identity in range(1, 141))
+        self.server.search_response = (rows + "200 OK\r\n").encode()
         client.send("search file.bin")
         results = client.search_results()
         self.assertEqual(len(results), 140)
@@ -538,7 +586,7 @@ class ClientFileTests(unittest.TestCase):
         client.send("unshare file.bin")
         client.send("shares")
         client.expect("SHARE file.bin 4 PENDING")
-        self.assertEqual(self.peer_get(client, "file.bin"), b"404\r\n")
+        self.assertEqual(self.peer_get(client, "file.bin"), b"550 File not shared\r\n")
         self.assertIn("Retry unshare before hello/login", client.errors())
         self.assertTrue(catalog.is_dir())
         catalog.rmdir()
@@ -552,13 +600,13 @@ class ClientFileTests(unittest.TestCase):
         client.login()
         self.share(client, "file.bin", b"data")
         (client.directory / "file.bin").write_bytes(b"different length")
-        self.server.share_response = b"500\r\n"
+        self.server.share_response = b"451 Local processing error\r\n"
         client.send("share file.bin")
-        client.expect("500")
+        client.expect("451 Local processing error")
         client.expect("200 UNSHARED")
         client.send("search file.bin")
         self.assertEqual(client.search_results(), [])
-        self.assertEqual(self.peer_get(client, "file.bin"), b"404\r\n")
+        self.assertEqual(self.peer_get(client, "file.bin"), b"550 File not shared\r\n")
 
 
 if __name__ == "__main__":

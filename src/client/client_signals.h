@@ -6,8 +6,9 @@
 typedef struct ClientSignals ClientSignals;
 
 /* One controller per process, created/destroyed on the main thread. Owns its
- * notification pipe and handles HUP/INT/QUIT/TERM/PIPE until stop restores the
- * previous dispositions. Returns NULL with errno on initialization failure.
+ * notification pipe and handles SIGHUP, SIGINT, SIGQUIT, SIGTERM, and SIGPIPE
+ * until stop restores the previous dispositions. Returns NULL with errno on
+ * initialization failure.
  * Workers must inherit blocked handled signals; see block_workers below.
  */
 ClientSignals *client_signals_start(void);

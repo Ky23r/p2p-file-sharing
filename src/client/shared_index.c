@@ -52,12 +52,14 @@ int shared_file_open(const char *path, uint64_t *size)
     if (fd < 0)
         return -1;
     struct stat info;
-    if (fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_size >= 0) {
+    int result = fstat(fd, &info);
+    if (result == 0 && S_ISREG(info.st_mode) && info.st_size >= 0) {
         *size = (uint64_t)info.st_size;
         return fd;
     }
+    int error = result < 0 ? errno : EINVAL;
     close(fd);
-    errno = EINVAL;
+    errno = error;
     return -1;
 }
 
@@ -218,13 +220,12 @@ int shared_index_add(SharedIndex *index, const char *path, char name[FILE_NAME_C
     if (canonical == NULL)
         return -1;
     const char *basename = strrchr(canonical, '/') + 1;
-    char token[FILE_NAME_TOKEN_CAP];
     if (strlen(canonical) >= FILE_PATH_CAP) {
         free(canonical);
         errno = ENAMETOOLONG;
         return -1;
     }
-    if (!valid_path(canonical) || !protocol_encode_filename(basename, token, sizeof(token))) {
+    if (!valid_path(canonical) || !protocol_valid_filename(basename)) {
         free(canonical);
         errno = EINVAL;
         return -1;
@@ -317,7 +318,7 @@ int shared_index_open(SharedIndex *index, const char *name, uint64_t *size)
     pthread_mutex_lock(&index->mutex);
     size_t position = find_entry(index, name);
     int fd = -1;
-    errno = EACCES;
+    errno = ENODATA;
     if (index->online && position < index->count && index->entries[position].announced) {
         fd = shared_file_open(index->entries[position].path, size);
         if (fd >= 0 && *size != index->entries[position].size) {
