@@ -594,7 +594,7 @@ class ClientFileTests(unittest.TestCase):
         restarted.expect("200 SHARED")
         self.assertEqual(self.peer_get(restarted, "file.bin"), single_frame_reply(b"data"))
 
-    def test_failed_catalog_removal_disables_serving_and_warns_before_republish(self):
+    def test_failed_catalog_removal_keeps_local_share_and_server_listing(self):
         client = self.client()
         client.login()
         self.share(client, "file.bin", b"data")
@@ -604,15 +604,76 @@ class ClientFileTests(unittest.TestCase):
         catalog.mkdir()  # Atomic replacement must fail instead of deleting this directory.
         client.send("unshare file.bin")
         client.send("shares")
-        client.expect("SHARE file.bin 4 PENDING")
-        self.assertEqual(self.peer_get(client, "file.bin"), b"404\r\n")
-        self.assertIn("Retry unshare before hello/login", client.errors())
+        client.expect("SHARE file.bin 4 ANNOUNCED")
+        self.assertEqual(self.peer_get(client, "file.bin"), single_frame_reply(b"data"))
+        self.assertIn("Cannot save share removal", client.errors())
+        with self.server.lock:
+            self.assertIn(b"file.bin", self.server.peers[1][2])
+            self.assertNotIn(b"UNSHARE file.bin\r\n", self.server.requests)
         self.assertTrue(catalog.is_dir())
         catalog.rmdir()
         backup.rename(catalog)
         client.send("unshare file.bin")
         client.expect("200 UNSHARED")
         self.assertEqual(catalog.read_bytes(), b"")
+
+    def test_unshare_retries_a_rejected_withdrawal_while_idle(self):
+        first, second = self.client(), self.client()
+        first.login()
+        second.login()
+        self.share(first, "file.bin", b"first")
+        self.share(second, "file.bin", b"second")
+        self.server.unshare_rejections = [b"500\r\n"]
+
+        first.send("unshare file.bin")
+        first.expect("500")
+        self.assertEqual((first.directory / "index.txt").read_bytes(), b"")
+        self.assertEqual(self.peer_get(first, "file.bin"), b"404\r\n")
+
+        deadline = time.monotonic() + 13
+        while time.monotonic() < deadline:
+            with self.server.lock:
+                if b"file.bin" not in self.server.peers[1][2]:
+                    self.assertIn(b"file.bin", self.server.peers[2][2])
+                    return
+            time.sleep(0.02)
+        self.fail("The idle client did not retry UNSHARE")
+
+    def test_reshare_cancels_a_pending_withdrawal_of_the_same_name(self):
+        client = self.client()
+        client.login()
+        self.share(client, "file.bin", b"old")
+        self.server.unshare_rejections = [b"500\r\n"]
+        client.send("unshare file.bin")
+        client.expect("500")
+        self.assertEqual((client.directory / "index.txt").read_bytes(), b"")
+
+        self.share(client, "file.bin", b"new data")
+        client.send("hello")
+        client.expect("200 HELLO")
+        client.expect("200 SHARED")
+        with self.server.lock:
+            self.assertEqual(self.server.requests.count(b"UNSHARE file.bin\r\n"), 1)
+            self.assertEqual(self.server.peers[1][2][b"file.bin"], len(b"new data"))
+        self.assertEqual(self.peer_get(client, "file.bin"), single_frame_reply(b"new data"))
+
+    def test_lost_unshare_reply_does_not_republish_after_restart(self):
+        client = self.client()
+        client.login()
+        self.share(client, "file.bin", b"data")
+        self.server.close_after_unshare = True
+
+        client.send("unshare file.bin")
+        self.assertNotEqual(client.process.wait(timeout=5), 0)
+        self.assertEqual((client.directory / "index.txt").read_bytes(), b"")
+        self.assertTrue((client.directory / "file.bin").is_file())
+
+        restarted = Client(client.directory, self.server.port, identity=None)
+        self.addCleanup(restarted.close)
+        restarted.login()
+        restarted.send("search file.bin")
+        self.assertEqual(restarted.search_results(), [])
+        self.assertEqual(self.peer_get(restarted, "file.bin"), b"404\r\n")
 
     def test_failed_reannouncement_withdraws_previous_server_metadata(self):
         client = self.client()

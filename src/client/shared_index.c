@@ -270,7 +270,6 @@ int shared_index_remove(SharedIndex *index, const char *name)
     size_t position = find_entry(index, name);
     int result = 0;
     if (position < index->count) {
-        index->entries[position].announced = false;
         result = save_index(index, position);
         if (result == 0) {
             memmove(index->entries + position, index->entries + position + 1,

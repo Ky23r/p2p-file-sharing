@@ -29,8 +29,8 @@ void shared_index_destroy(SharedIndex *index);
  * Same name/path is idempotent; a different path with that name gives EEXIST.
  */
 int shared_index_add(SharedIndex *index, const char *path, char name[FILE_NAME_CAP]);
-/* Idempotent removal, 0 or -1/errno. On save failure retain the entry inactive;
- * its old on-disk intent may be republished after a later login/restart.
+/* Idempotent removal, 0 or -1/errno. On save failure keep the entry and its
+ * announcement unchanged. A successful removal prevents new opens.
  */
 int shared_index_remove(SharedIndex *index, const char *name);
 /* Copy entry at zero-based position; false means it is outside the catalog. */

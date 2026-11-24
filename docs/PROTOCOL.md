@@ -174,10 +174,19 @@ pending in the local catalog. A client clears search results after logout and
 before each new search. Malformed replies and transport failure end the control
 session and disable new uploads.
 
-A local share is saved before announcement. For an active session, either
-`200` or `404` from UNSHARE confirms the advertisement is absent. If saving
-the removal fails, the entry stays pending. Retry the removal after fixing
-storage and before HELLO, login, or restart, which can reannounce it.
+A local share is saved before announcement. The terminal's `unshare` first
+saves the catalog removal. A save failure leaves the local entry, serving
+state, and server advertisement intact. A successful save disables new uploads
+for that name. On an active session, the client then sends `UNSHARE` and treats
+either `200` or `404` as confirmation that the advertisement is absent.
+
+A rejected withdrawal stays queued in memory. The client retries it during the
+10-second keepalive cycle or on a successful manual `hello`. Control exchanges
+are serialized. A successful later `SHARE` for the same name cancels any queued
+withdrawal for the older listing. Logout or disconnect clears any remaining
+advertisements for the session. A saved removal survives a client restart,
+including when the connection closed before the `UNSHARE` reply arrived.
+
 The catalog uses hex-encoded names and absolute paths, separated by a tab
 with one LF-terminated record per entry. A separate lock file protects writes.
 Legacy non-ASCII basenames can be removed from the catalog.

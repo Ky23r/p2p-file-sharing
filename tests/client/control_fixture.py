@@ -19,6 +19,8 @@ class ControlFixture:
         self.logout_response = b"200\r\n"
         self.close_after_search = False
         self.hello_responses = []
+        self.unshare_rejections = []
+        self.close_after_unshare = False
         fixture = self
 
         class Handler(socketserver.StreamRequestHandler):
@@ -76,7 +78,9 @@ class ControlFixture:
                                 if response == b"200\r\n":
                                     shares[args[0]] = int(args[1])
                             elif command == b"UNSHARE" and len(args) == 1:
-                                if args[0] in shares:
+                                if fixture.unshare_rejections:
+                                    response = fixture.unshare_rejections.pop(0)
+                                elif args[0] in shares:
                                     del shares[args[0]]
                                     response = b"200\r\n"
                                 else:
@@ -93,6 +97,8 @@ class ControlFixture:
                                             rows.append((peer[0], row))
                                     rows.sort()
                                     response = b"".join(row for _, row in rows) + b"200 END\r\n"
+                        if command == b"UNSHARE" and fixture.close_after_unshare:
+                            return
                         self.wfile.write(response)
                         self.wfile.flush()
                         if command == b"SEARCH" and fixture.close_after_search:

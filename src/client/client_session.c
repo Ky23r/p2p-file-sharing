@@ -18,6 +18,11 @@
 
 #define CLIENT_KEEPALIVE_SECONDS 10
 
+typedef struct PendingUnshare {
+    struct PendingUnshare *next;
+    char token[FILE_NAME_TOKEN_CAP];
+} PendingUnshare;
+
 struct ClientSession {
     net_reader server;
     char *response;
@@ -32,6 +37,7 @@ struct ClientSession {
     uint32_t id;
     uint16_t port;
     SharedIndex *index;
+    PendingUnshare *withdrawals;
     const char *downloads;
     ClientSignals *signals;
     size_t result_count;
@@ -39,13 +45,30 @@ struct ClientSession {
     FileSearchResult *results;
 };
 
-enum reply_output { REPLY_BACKGROUND, REPLY_ALL, REPLY_ERRORS };
+enum reply_output { REPLY_KEEPALIVE, REPLY_UNSHARE_RETRY, REPLY_ALL, REPLY_ERRORS };
 
 /* Every function ending in _locked requires the control exchange mutex. */
+static void remove_withdrawal_locked(PendingUnshare **link)
+{
+    PendingUnshare *withdrawal = *link;
+    *link = withdrawal->next;
+    free(withdrawal);
+}
+
+static PendingUnshare **find_withdrawal_locked(ClientSession *client, const char *token)
+{
+    PendingUnshare **link = &client->withdrawals;
+    while (*link != NULL && strcmp((*link)->token, token) != 0)
+        link = &(*link)->next;
+    return link;
+}
+
 static void deactivate_locked(ClientSession *client)
 {
     client->announced = false;
     client->result_count = 0;
+    while (client->withdrawals != NULL)
+        remove_withdrawal_locked(&client->withdrawals);
     shared_index_set_online(client->index, false);
 }
 
@@ -79,8 +102,10 @@ static enum request_result error_response_locked(ClientSession *client, const ch
 {
     if (!protocol_error(line, length))
         return fail_locked(client);
-    if (output == REPLY_BACKGROUND)
+    if (output == REPLY_KEEPALIVE)
         fprintf(stderr, "Peer keepalive rejected: %s.\n", line);
+    else if (output == REPLY_UNSHARE_RETRY)
+        fprintf(stderr, "Unshare retry rejected: %s.\n", line);
     else
         puts(line);
     if (strcmp(line, STATUS_BUSY) == 0)
@@ -125,7 +150,7 @@ static enum request_result hello_locked(ClientSession *client, enum reply_output
     return exchange_locked(client, request, STATUS_OK, output);
 }
 
-static enum request_result unshare_locked(ClientSession *client, const char *token)
+static enum request_result unshare_locked(ClientSession *client, const char *token, enum reply_output output)
 {
     char request[FILE_NAME_TOKEN_CAP + sizeof("UNSHARE " CRLF)];
     snprintf(request, sizeof(request), "UNSHARE %s" CRLF, token);
@@ -135,7 +160,28 @@ static enum request_result unshare_locked(ClientSession *client, const char *tok
     /* A 404 also confirms the advertisement is absent. */
     if (response_is(client->response, length, STATUS_OK) || response_is(client->response, length, STATUS_NOT_FOUND))
         return REQUEST_OK;
-    return error_response_locked(client, client->response, length, REPLY_ERRORS);
+    return error_response_locked(client, client->response, length, output);
+}
+
+static enum request_result withdraw_locked(ClientSession *client, PendingUnshare **link, enum reply_output output)
+{
+    enum request_result result = unshare_locked(client, (*link)->token, output);
+    if (result == REQUEST_OK)
+        remove_withdrawal_locked(link);
+    return result;
+}
+
+static enum request_result retry_withdrawals_locked(ClientSession *client)
+{
+    PendingUnshare **link = &client->withdrawals;
+    while (*link != NULL) {
+        enum request_result result = withdraw_locked(client, link, REPLY_UNSHARE_RETRY);
+        if (result == REQUEST_FAILED)
+            return result;
+        if (result == REQUEST_REJECTED)
+            link = &(*link)->next;
+    }
+    return REQUEST_OK;
 }
 
 static enum request_result publish_locked(ClientSession *client, const SharedFile *entry)
@@ -157,13 +203,17 @@ static enum request_result publish_locked(ClientSession *client, const SharedFil
         snprintf(request, sizeof(request), "SHARE %s %" PRIu64 CRLF, token, size);
         result = exchange_locked(client, request, STATUS_OK, REPLY_ERRORS);
         if (result == REQUEST_OK) {
+            /* The server has replaced any listing from before this SHARE. */
+            PendingUnshare **withdrawal = find_withdrawal_locked(client, token);
+            if (*withdrawal != NULL)
+                remove_withdrawal_locked(withdrawal);
             shared_index_mark(client->index, entry->name, true, size);
             puts(STATUS_OK " SHARED");
             return REQUEST_OK;
         }
     }
     if (result != REQUEST_FAILED && entry->announced) {
-        enum request_result removal = unshare_locked(client, token);
+        enum request_result removal = unshare_locked(client, token, REPLY_ERRORS);
         if (removal == REQUEST_FAILED)
             return removal;
         if (removal == REQUEST_OK)
@@ -195,8 +245,8 @@ static void *keepalive_loop(void *argument)
         /* A rejected HELLO leaves the server's previous registration intact.
          * Transport/framing failures already deactivate the peer in fail_locked.
          */
-        if (client->announced)
-            (void)hello_locked(client, REPLY_BACKGROUND);
+        if (client->announced && hello_locked(client, REPLY_KEEPALIVE) != REQUEST_FAILED)
+            (void)retry_withdrawals_locked(client);
     }
     pthread_mutex_unlock(&client->mutex);
     return NULL;
@@ -307,7 +357,8 @@ enum request_result client_hello(ClientSession *client)
         shared_index_set_online(client->index, true);
         puts(STATUS_OK " HELLO");
         SharedFile entry;
-        for (size_t i = 0; shared_index_get(client->index, i, &entry); ++i)
+        result = retry_withdrawals_locked(client);
+        for (size_t i = 0; result == REQUEST_OK && shared_index_get(client->index, i, &entry); ++i)
             if (publish_locked(client, &entry) == REQUEST_FAILED) {
                 result = REQUEST_FAILED;
                 break;
@@ -359,18 +410,38 @@ enum request_result client_unshare(ClientSession *client, const char *name)
         return REQUEST_REJECTED;
     }
     pthread_mutex_lock(&client->mutex);
-    enum request_result result = REQUEST_OK;
+    enum request_result result = REQUEST_REJECTED;
     char token[FILE_NAME_TOKEN_CAP];
-    if (client->announced && protocol_encode_filename(name, token, sizeof(token)))
-        result = unshare_locked(client, token);
-    if (result == REQUEST_OK) {
-        if (shared_index_remove(client->index, name) != 0) {
-            fprintf(stderr, "Cannot save share removal: %s. Retry unshare before hello/login.\n", strerror(errno));
-            result = REQUEST_REJECTED;
-        } else {
-            puts(STATUS_OK " UNSHARED");
+    PendingUnshare **withdrawal = NULL;
+    PendingUnshare *reserved = NULL;
+    if (client->announced && protocol_encode_filename(name, token, sizeof(token))) {
+        withdrawal = find_withdrawal_locked(client, token);
+        if (*withdrawal == NULL) {
+            reserved = malloc(sizeof(*reserved));
+            if (reserved == NULL) {
+                fprintf(stderr, "Cannot prepare share removal: %s.\n", strerror(errno));
+                goto unlock;
+            }
+            reserved->next = NULL;
+            strcpy(reserved->token, token);
         }
     }
+    if (shared_index_remove(client->index, name) != 0) {
+        fprintf(stderr, "Cannot save share removal: %s.\n", strerror(errno));
+        free(reserved);
+        goto unlock;
+    }
+    result = REQUEST_OK;
+    if (withdrawal != NULL) {
+        if (reserved != NULL)
+            *withdrawal = reserved;
+        result = withdraw_locked(client, withdrawal, REPLY_ERRORS);
+        if (result == REQUEST_REJECTED)
+            fprintf(stderr, "Removed %s locally. Server withdrawal will be retried.\n", name);
+    }
+    if (result == REQUEST_OK)
+        puts(STATUS_OK " UNSHARED");
+unlock:
     pthread_mutex_unlock(&client->mutex);
     return result;
 }

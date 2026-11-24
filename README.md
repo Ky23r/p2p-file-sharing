@@ -32,6 +32,17 @@ The client defaults to the local server, peer port `9001`, ID file
 `config.txt`, catalog `index.txt`, and download directory `.`. Use
 `--server IPv4` and `--port PORT` to choose the control endpoint.
 
+For a LAN check with two workstations, replace `192.168.1.20` with the server's
+LAN IPv4 address. Run the first command on the server and one client command on
+each workstation. Use separate accounts and allow TCP connections on the
+server port and the peer listener ports.
+
+```sh
+./server --bind 192.168.1.20 --port 9000
+./client --server 192.168.1.20 --port 9000 --peer-port 9001
+./client --server 192.168.1.20 --port 9000 --peer-port 9002
+```
+
 | Command | Action |
 | --- | --- |
 | `register USER` | Create an account |
@@ -57,6 +68,12 @@ Local shares survive logout and restart. A failed download is displayed locally
 and its temporary file is removed. A completed download cannot overwrite an
 existing path. Ctrl+C or SIGTERM stops a pending download, restores terminal
 echo, and joins the client workers.
+
+`unshare` saves the local removal before requesting removal on the server. If
+the save fails, the file stays shared. After a successful save, the client
+stops accepting new downloads for that file and retries a rejected server
+withdrawal while the control session stays active. A later successful `share`
+of the same name replaces the old advertisement and cancels its queued removal.
 
 ## Protocol and storage
 
