@@ -308,7 +308,8 @@ void shared_index_mark(SharedIndex *index, const char *name, bool announced, uin
     size_t position = find_entry(index, name);
     if (position < index->count) {
         index->entries[position].announced = announced;
-        index->entries[position].size = size;
+        if (announced)
+            index->entries[position].size = size;
     }
     pthread_mutex_unlock(&index->mutex);
 }
@@ -329,4 +330,10 @@ int shared_index_open(SharedIndex *index, const char *name, uint64_t *size)
     }
     pthread_mutex_unlock(&index->mutex);
     return fd;
+}
+
+bool shared_file_stale(int error)
+{
+    return error == ESTALE || error == ENOENT || error == ENOTDIR ||
+           error == ELOOP || error == EINVAL || error == EACCES;
 }

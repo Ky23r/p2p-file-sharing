@@ -27,13 +27,11 @@ typedef struct {
     pthread_cond_t empty;
     session *head;
     size_t count;
-    uint64_t last_revision;
     bool stopping;
 } session_manager;
 
 typedef struct {
     uint64_t size;
-    uint64_t revision;
     uint32_t client_id;
     char ip[INET_ADDRSTRLEN];
     uint16_t port;
@@ -69,10 +67,6 @@ enum session_result session_share(session_manager *manager, session *client,
                                   uint32_t id, const char *filename, uint64_t size);
 enum session_result session_unshare(session_manager *manager, session *client,
                                     const char *filename);
-/* Withdraw only the current advertisement identified by the report. */
-enum session_result session_report(session_manager *manager, const session *reporter,
-                                   uint32_t id, const char *filename, uint64_t revision,
-                                   bool withdraw, bool *removed);
 /* Caller frees the snapshot. Zero results sets matches=NULL and count=0.
  * Snapshot records remain valid after their owning sessions disconnect.
  */

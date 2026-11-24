@@ -95,10 +95,10 @@ enum download_result download_file(const FileSearchResult *result, const char *d
     if (protocol_error(header, header_length)) {
         errno = EPROTO;
         if (strcmp(header, REPLY_FILE_UNAVAILABLE) == 0 || strcmp(header, REPLY_FILE_NOT_SHARED) == 0) {
-            result_code = strcmp(header, REPLY_FILE_UNAVAILABLE) == 0 ? DOWNLOAD_NOT_FOUND : DOWNLOAD_UNAVAILABLE;
+            result_code = DOWNLOAD_NOT_FOUND;
             errno = ENOENT;
         } else if (strcmp(header, REPLY_FILE_SIZE_CHANGED) == 0) {
-            result_code = DOWNLOAD_SIZE_CHANGED;
+            result_code = DOWNLOAD_SIZE_MISMATCH;
         } else {
             result_code = DOWNLOAD_TRANSFER_FAILED;
         }

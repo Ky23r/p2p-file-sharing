@@ -58,7 +58,7 @@ int main(void)
     struct sockaddr_in address;
     socklen_t address_size = sizeof(address);
     assert(getsockname(listener, (struct sockaddr *)&address, &address_size) == 0);
-    PeerServer *server = peer_server_start(listener, index);
+    PeerServer *server = peer_server_start(listener, index, NULL, NULL);
     assert(server != NULL);
     int peer = file_connect("127.0.0.1", ntohs(address.sin_port), NULL);
     assert(peer >= 0);

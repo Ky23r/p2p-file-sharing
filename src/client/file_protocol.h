@@ -20,7 +20,6 @@ typedef struct {
     char ip[16];
     uint16_t port;
     uint64_t size;
-    uint64_t revision;
     char name[FILE_NAME_CAP];
 } FileSearchResult;
 

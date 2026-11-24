@@ -40,8 +40,7 @@ class FileProtocolTests(unittest.TestCase):
             self.assertTrue(line.startswith(b"200-"), line)
             results.append(line[4:].split())
         for record in results:
-            self.assertEqual(len(record), 6)
-            self.assertGreater(int(record[5]), 0)
+            self.assertEqual(len(record), 5)
             self.assertEqual(record[0], filename.encode())
             self.assertEqual(record[3], b"127.0.0.1")
         ids = [int(record[2]) for record in results]
@@ -50,8 +49,7 @@ class FileProtocolTests(unittest.TestCase):
 
     def test_authentication_hello_and_validation_precedence(self):
         with self.server.connect() as client:
-            commands = ["SHARE 20 notes.txt 1", "UNSHARE notes.txt", "SEARCH notes.txt",
-                        "REPORT 20 notes.txt 1 NOT_FOUND"]
+            commands = ["SHARE 20 notes.txt 1", "UNSHARE notes.txt", "SEARCH notes.txt"]
             for command in commands:
                 self.assertEqual(client.command(command), b"530 Not logged in")
             self.assertEqual(client.command(f"LOGIN alice {PASSWORD}"), b"200 OK")
@@ -79,7 +77,7 @@ class FileProtocolTests(unittest.TestCase):
     def test_share_update_search_and_owner_only_removal(self):
         self.assertEqual(self.owner.command("SHARE 20 notes.txt 0"), b"200 OK")
         row, = self.search(self.viewer)
-        self.assertEqual(row[:5], [b"notes.txt", b"0", b"20", b"127.0.0.1", b"9020"])
+        self.assertEqual(row, [b"notes.txt", b"0", b"20", b"127.0.0.1", b"9020"])
         self.assertEqual(self.viewer.command("UNSHARE notes.txt"), b"550 File not shared")
         self.assertEqual(self.owner.command("SHARE 20 notes.txt 18446744073709551615"), b"200 OK")
         self.assertEqual(self.search(self.viewer)[0][1], b"18446744073709551615")
@@ -112,35 +110,13 @@ class FileProtocolTests(unittest.TestCase):
         cases += ["SHARE", "SHARE notes.txt", "SHARE notes.txt 1", "SHARE 20 notes.txt 1 extra",
                   "SEARCH", "SEARCH a b",
                   "UNSHARE", "UNSHARE a b",
-                  "SHARE  20 notes.txt 1", "SHARE 20 notes.txt 1 ",
-                  "REPORT 20 notes.txt 0 NOT_FOUND", "REPORT 20 notes.txt 1 UNKNOWN"]
+                  "SHARE  20 notes.txt 1", "SHARE 20 notes.txt 1 "]
         for request in cases:
             with self.subTest(request=request[:80]):
                 self.assertEqual(self.owner.command(request), b"501 Invalid arguments")
         for request in ("NOPE", "NOPE a b", "NOPE a b c d e"):
             self.assertEqual(self.owner.command(request), b"500 Invalid or unknown command")
         self.assertEqual(self.owner.command("SHARE 20 valid.txt 1"), b"200 OK")
-
-    def test_failure_reports_only_withdraw_the_matching_revision(self):
-        self.assertEqual(self.owner.command("SHARE 20 notes.txt 1"), b"200 OK")
-        self.assertEqual(self.viewer.command("SHARE 10 notes.txt 2"), b"200 OK")
-        original = int(self.search(self.viewer)[1][5])
-        self.assertEqual(self.viewer.command(f"REPORT 20 notes.txt {original} TIMEOUT"), b"200 OK")
-        self.assertEqual(len(self.search(self.viewer)), 2)
-        self.assertEqual(self.owner.command("HELLO 20 9999"), b"200 OK")
-        moved = int(self.search(self.viewer)[1][5])
-        self.assertNotEqual(moved, original)
-        self.assertEqual(self.viewer.command(f"REPORT 20 notes.txt {original} NOT_FOUND"), b"200 OK")
-        self.assertEqual(len(self.search(self.viewer)), 2)
-        self.assertEqual(self.owner.command("SHARE 20 notes.txt 1"), b"200 OK")
-        current = int(self.search(self.viewer)[1][5])
-        self.assertNotEqual(current, moved)
-        self.assertEqual(self.viewer.command(f"REPORT 20 notes.txt {moved} SIZE_CHANGED"), b"200 OK")
-        self.assertEqual(len(self.search(self.viewer)), 2)
-        report = f"REPORT 20 notes.txt {current} NOT_FOUND"
-        self.assertEqual(self.viewer.command(report), b"200 OK")
-        self.assertEqual(self.viewer.command(report), b"200 OK")
-        self.assertEqual([int(row[2]) for row in self.search(self.viewer)], [10])
 
     def test_over_128_shares_support_updates_and_removal(self):
         for i in range(140):
@@ -191,7 +167,7 @@ class FileProtocolTests(unittest.TestCase):
         self.viewer.socket.sendall(b"SEARCH notes.txt\r")
         self.viewer.socket.sendall(b"\nSEARCH absent\r\nLOGOUT\r\n")
         self.assertEqual([self.viewer.line() for _ in range(4)],
-                         [b"200-notes.txt 42 20 127.0.0.1 9020 1", b"200 OK", b"200 OK", b"200 OK"])
+                         [b"200-notes.txt 42 20 127.0.0.1 9020", b"200 OK", b"200 OK", b"200 OK"])
 
     def test_search_results_larger_than_a_network_read_buffer(self):
         filename = "%20" * 255

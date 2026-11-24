@@ -46,7 +46,7 @@ class ClientServerIntegrationTests(unittest.TestCase):
 
     def test_two_clients_transfer_encoded_binary_and_empty_files(self):
         binary = bytes(range(256)) * 4097
-        for name, contents in (("report % +.bin", binary), ("empty +%.bin", b"")):
+        for name, contents in (("sample % +.bin", binary), ("empty +%.bin", b"")):
             with self.subTest(name=name):
                 self.share(name, contents)
                 self.assertEqual(self.search(self.viewer, name.split()[0]), [])
@@ -108,17 +108,17 @@ class ClientServerIntegrationTests(unittest.TestCase):
         self.assertEqual(self.search(self.viewer, name),
                          [self.expected_row(name, identity=90, port=port)])
         self.assertIn("failed: CONNECT_FAILED", self.viewer.errors())
-        log = self.server.accounts.with_suffix(".db.log").read_text()
-        self.assertIn("reason=CONNECT_FAILED action=recorded", log)
         self.assertFalse((self.viewer.directory / name).exists())
         self.assertEqual(list(self.viewer.directory.glob(".p2p-download-*")), [])
 
-    def test_download_failure_withdraws_only_the_stale_peer(self):
+    def test_owner_withdraws_only_its_stale_share(self):
         backup = self.client("backup", 30)
         backup.login()
-        for reason in ("NOT_FOUND", "SIZE_CHANGED"):
-            with self.subTest(reason=reason):
-                name = f"{reason}.bin"
+        for name, replacement, failure in (
+            ("missing.bin", None, b"550 File unavailable\r\n"),
+            ("resized.bin", b"changed size", b"550 File size changed\r\n"),
+        ):
+            with self.subTest(name=name):
                 self.share(name, b"data")
                 (backup.directory / name).write_bytes(b"backup")
                 backup.send("share " + name)
@@ -129,17 +129,27 @@ class ClientServerIntegrationTests(unittest.TestCase):
                 self.assertEqual(self.search(self.viewer, name), initial_rows)
 
                 source = self.owner.directory / name
-                if reason == "NOT_FOUND":
+                if replacement is None:
                     source.unlink()
                 else:
-                    source.write_bytes(b"changed size")
-                self.viewer.send("download 1")
+                    source.write_bytes(replacement)
+                with socket.create_connection(("127.0.0.1", self.owner.peer_port), timeout=4) as peer:
+                    peer.sendall(f"GET {name}\r\n".encode())
+                    with peer.makefile("rb") as reply:
+                        self.assertEqual(reply.read(), failure)
+
                 self.assertEqual(self.search(self.viewer, name), [backup_row])
+                self.owner.send("shares")
+                self.owner.expect(f"SHARE {name} 4 PENDING")
                 log = self.server.accounts.with_suffix(".db.log").read_text()
-                self.assertIn(f"reason={reason} action=withdrawn", log)
+                self.assertIn(f"command=UNSHARE result=200 filename={name}", log)
                 self.viewer.send("download 1")
                 self.viewer.expect("Downloaded " + name)
                 self.assertEqual((self.viewer.directory / name).read_bytes(), b"backup")
+                self.share(name, b"restored")
+                self.assertEqual(self.search(self.viewer, name), initial_rows)
+                self.owner.send("unshare " + name)
+                self.owner.expect("200 UNSHARED")
 
     def test_search_accepts_maximum_file_size_without_displaying_it(self):
         maximum = 18446744073709551615

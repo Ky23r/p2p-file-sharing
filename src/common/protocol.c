@@ -17,7 +17,7 @@ const char *protocol_command(const char *line, size_t length)
 {
     static const char *const commands[] = {
         CMD_REGISTER, CMD_LOGIN, CMD_HELLO, CMD_LOGOUT, CMD_SHARE,
-        CMD_UNSHARE, CMD_SEARCH, CMD_REPORT, CMD_GET
+        CMD_UNSHARE, CMD_SEARCH, CMD_GET
     };
     if (!printable_ascii(line, length))
         return NULL;

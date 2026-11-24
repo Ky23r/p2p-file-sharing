@@ -19,6 +19,7 @@ class ControlFixture:
         self.logout_response = b"200 OK\r\n"
         self.close_after_search = False
         self.hello_responses = []
+        self.unshare_received = threading.Event()
         fixture = self
 
         class Handler(socketserver.StreamRequestHandler):
@@ -38,6 +39,8 @@ class ControlFixture:
                         fields = line[:-2].split(b" ")
                         command, args = fields[0].upper(), fields[1:]
                         response = b"501 Invalid arguments\r\n"
+                        if command == b"UNSHARE":
+                            fixture.unshare_received.set()
                         with fixture.lock:
                             fixture.requests.append(line)
                             if command == b"REGISTER" and len(args) == 2:
@@ -100,12 +103,10 @@ class ControlFixture:
                                     rows = []
                                     for _, peer, files in fixture.peers.values():
                                         if name in files:
-                                            row = b"200-" + name + f" {files[name]} {peer[0]} {peer[1]} {peer[2]} 1\r\n".encode()
+                                            row = b"200-" + name + f" {files[name]} {peer[0]} {peer[1]} {peer[2]}\r\n".encode()
                                             rows.append((peer[0], row))
                                     rows.sort()
                                     response = b"".join(row for _, row in rows) + b"200 OK\r\n"
-                            elif command == b"REPORT" and len(args) == 4:
-                                response = b"200 OK\r\n"
                         self.wfile.write(response)
                         self.wfile.flush()
                         if command == b"SEARCH" and fixture.close_after_search:

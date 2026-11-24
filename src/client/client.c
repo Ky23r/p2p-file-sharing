@@ -12,7 +12,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -367,11 +366,6 @@ int main(int argc, char **argv)
         fprintf(stderr, "Shared-file index %s: %s\n", options.index, strerror(errno));
         goto cleanup;
     }
-    peers = peer_server_start(peer_listener, index);
-    if (peers == NULL) {
-        perror("Starting peer workers");
-        goto cleanup;
-    }
     fd = file_connect(options.ip, options.server_port, signals);
     if (fd < 0) {
         fprintf(stderr, "Connecting to %s:%u: %s\n", options.ip,
@@ -383,14 +377,22 @@ int main(int argc, char **argv)
     /* Input polling must see every byte, including redirected multi-line input. */
     setvbuf(stdin, NULL, _IONBF, 0);
     server = client_session_start(fd, id, options.peer_port, index, options.downloads, signals);
-    if (server == NULL)
+    if (server == NULL) {
         perror("Starting control session");
-    else if (client_stage_hello(server) == REQUEST_OK)
+        goto cleanup;
+    }
+    peers = peer_server_start(peer_listener, index, client_withdraw_stale_share, server);
+    if (peers == NULL) {
+        perror("Starting peer workers");
+        goto cleanup;
+    }
+    if (client_stage_hello(server) == REQUEST_OK)
         result = run_client(server, id, options.peer_port, signals);
 cleanup:
+    client_session_interrupt(server);
+    peer_server_stop(peers);
     client_session_stop(server);
     client_signals_close_socket(signals, fd);
-    peer_server_stop(peers);
     shared_index_destroy(index);
     if (peer_listener >= 0)
         close(peer_listener);

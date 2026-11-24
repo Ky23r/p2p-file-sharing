@@ -2,10 +2,8 @@
 
 ## Wire format
 
-The project uses its own IPv4 TCP protocol with command and reply conventions
-from [FTP, RFC 959](https://www.rfc-editor.org/rfc/rfc959.html) and
-[SMTP, RFC 5321](https://www.rfc-editor.org/rfc/rfc5321.html). In the examples,
-each wire text line ends with CRLF (`\r\n`).
+The control and peer channels use IPv4 TCP. Each wire text line ends with
+CRLF (`\r\n`).
 
 - Requests use `VERB [argument ...] CRLF`, with one ASCII space between tokens.
   The client sends uppercase verbs. Receivers accept any ASCII letter case
@@ -15,7 +13,7 @@ each wire text line ends with CRLF (`\r\n`).
   leading or trailing space. The code determines the outcome. Defined file
   replies also carry text that identifies the specific file condition.
 - A successful search can have continuation lines in the form
-  `200-<filename> <size> <client_id> <IPv4> <port> <revision> CRLF`. A final
+  `200-<filename> <size> <client_id> <IPv4> <port> CRLF`. A final
   `200` line with a space after the code completes the reply.
 
 The control server waits for the first request after accepting a connection.
@@ -43,7 +41,6 @@ buffers grow as needed.
 | `SHARE <client_id> <filename> <size>` | `200 OK` | Logged in with an active announcement matching the client ID |
 | `UNSHARE <filename>` | `200 OK` | Logged in with an active announcement |
 | `SEARCH <filename>` | Zero or more `200-` lines, then `200 OK` | Logged in with an active announcement |
-| `REPORT <peer_id> <filename> <revision> <reason>` | `200 OK` | Logged in with an active announcement |
 
 ## Reply codes
 
@@ -72,8 +69,7 @@ The server and peers emit the following final reply lines.
 
 A rejected control request receives a single final reply. `421` ends the
 connection. The client recognizes a valid final `200` by its code, even if
-the server's reply text differs from `OK`. Every peer connection closes after
-its one response.
+the server's reply text differs from `OK`.
 
 The terminal accepts lowercase commands as listed in the [README](../README.md).
 `help` displays the terminal command list and `quit` closes the connection
@@ -89,7 +85,6 @@ accept `--help` at process launch.
 | Client ID | Unsigned decimal, 0 through 4294967295 |
 | Peer port | Unsigned decimal, 1 through 65535 |
 | File size | Unsigned decimal, 0 through 18446744073709551615 bytes |
-| Advertisement revision | Unsigned decimal, 1 through 18446744073709551615 |
 | Filename | Canonically encoded, case-sensitive basename |
 
 Decimal inputs accept leading zeros and reject signs and overflow. Numeric
@@ -113,20 +108,14 @@ announcement can send `HELLO` afterward. An account may have several
 connections with different active client IDs.
 
 A rejected `HELLO` leaves the previous announcement intact. Updating the port
-under the same ID preserves shares and assigns them a new revision. Changing
-the ID clears shares. Logout or disconnect releases the ID and its shares
-atomically. Accounts persist across server restarts. Announcements and the file
-index are held in memory.
+under the same ID preserves shares. Changing the ID clears shares. Logout
+and disconnect release the ID and its shares atomically. Accounts persist
+across server restarts. Announcements and the file index live in memory.
 
-`SHARE` adds or updates the current connection's filename and size and assigns
-a new revision even when the size stays the same. `UNSHARE` removes only that
-connection's advertisement. `SEARCH` matches the complete filename, including
-case. Each continuation line carries the size in bytes for transfer validation
-and the revision to use in a failure report.
-
-```text
-200-<filename> <size> <client_id> <IPv4> <port> <revision>
-```
+`SHARE` adds or updates the current connection's filename and size.
+`UNSHARE` removes only that connection's advertisement. `SEARCH` matches
+the complete filename, including case. Each continuation line carries the
+size in bytes for transfer validation.
 
 The server sends a snapshot ordered by numeric client ID. The snapshot can
 include the requester and may include a peer that disconnects after the lookup.
@@ -134,8 +123,8 @@ For example, each line below ends in CRLF.
 
 ```text
 SEARCH my%20notes.txt
-200-my%20notes.txt 2048 12 127.0.0.1 9001 5
-200-my%20notes.txt 2048 34 127.0.0.1 9002 7
+200-my%20notes.txt 2048 12 127.0.0.1 9001
+200-my%20notes.txt 2048 34 127.0.0.1 9002
 200 OK
 ```
 
@@ -164,8 +153,9 @@ announced files, so use the service on a controlled network.
 A successful peer response starts with `200 <size>\r\n`, followed by exactly
 `size` raw bytes and a TCP close. An empty file has no body. The uploader
 returns a single `500`, `501`, `450`, or `550` error line if it rejects the
-request before sending a success header. A failure during the body closes the
-connection. The downloader requires the advertised size and clean EOF. It
+request before sending a success header. Each peer connection handles one
+request. A failure during the body closes the connection. The downloader
+requires the advertised size and clean EOF. It
 reads the header and body through the same socket buffer and writes to a
 private temporary file. It publishes the complete file without overwriting
 an existing path and deletes the temporary file on failure.
@@ -175,25 +165,12 @@ timeouts. Unshare, logout, or control failure disable new opens. An existing
 upload can finish. The transfer checks file type and size. Shared files must
 stay unchanged during transfers because the protocol carries no content hash.
 
-## Download failure reports
-
-The downloader sends `REPORT` on the control connection using the peer ID,
-filename, and revision from the selected search result. Local destination
-errors and cancellation stay local.
-
-| Reason | When sent | Server action |
-| --- | --- | --- |
-| `NOT_FOUND` | Peer returned `550 File unavailable` | Withdraw the matching advertisement |
-| `SIZE_CHANGED` | Peer returned `550 File size changed` | Withdraw the matching advertisement |
-| `CONNECT_FAILED` | Connection to the peer failed | Record the failure |
-| `TIMEOUT` | A peer socket operation timed out | Record the failure |
-| `TRANSFER_FAILED` | The peer returned another error or sent an invalid or incomplete transfer | Record the failure |
-
-The server checks the peer ID, filename, and revision together under the same
-lock used for index changes. A duplicate or outdated report receives `200 OK`
-and leaves any newer advertisement intact. Withdrawal affects just the matching
-peer's advertisement. On this controlled network, the server relies on the
-authenticated downloader to relay the peer's response accurately.
+If a `GET` finds an announced file missing, inaccessible, or resized, the
+uploader returns the peer error and rechecks the file before sending
+`UNSHARE` on its control connection. When the server confirms the listing
+is absent, the local catalog entry stays pending for a later announcement.
+Temporary failures leave the listing active. The downloader displays the
+failure locally.
 
 ## Client and service state
 
@@ -216,7 +193,6 @@ with one LF-terminated record per entry. A separate lock file protects writes.
 
 The server logs UTC timestamps, connections, request statuses, successful
 account usernames, peer announcements, file operations, and disconnects.
-Failure reports include the peer ID, filename, revision, reason, and action.
 Passwords and raw malformed input are excluded. The log defaults to
 `<accounts-path>.log` and can be set with `--log PATH`. It is a mode-0600
 regular file. Log and socket writes occur outside the session mutex. An

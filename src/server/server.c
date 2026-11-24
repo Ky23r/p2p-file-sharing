@@ -107,7 +107,7 @@ static const char *dispatch(server_state *server, session *client, const char *c
                             const char **search_name, const char **username,
                             char *detail, size_t detail_capacity)
 {
-    char *args[5];
+    char *args[4];
     size_t count = protocol_tokens(line, length, args, sizeof(args) / sizeof(args[0]));
     if (count == 0)
         return REPLY_INVALID_ARGUMENTS CRLF;
@@ -173,27 +173,6 @@ static const char *dispatch(server_state *server, session *client, const char *c
         }
         return session_response(result);
     }
-    if (strcmp(command, CMD_REPORT) == 0) {
-        uint32_t id;
-        uint64_t revision;
-        if (count != 5 || !decimal(args[1], UINT32_MAX, &id) ||
-            !protocol_decode_filename(args[2], decoded, sizeof(decoded)) ||
-            !protocol_parse_uint64(args[3], UINT64_MAX, &revision) || revision == 0)
-            return REPLY_INVALID_ARGUMENTS CRLF;
-        const char *reason = args[4];
-        bool withdraw = strcmp(reason, REPORT_NOT_FOUND) == 0 || strcmp(reason, REPORT_SIZE_CHANGED) == 0;
-        if (!withdraw && strcmp(reason, REPORT_CONNECT_FAILED) != 0 &&
-            strcmp(reason, REPORT_TIMEOUT) != 0 && strcmp(reason, REPORT_TRANSFER_FAILED) != 0)
-            return REPLY_INVALID_ARGUMENTS CRLF;
-        bool removed;
-        enum session_result result = session_report(&server->sessions, client, id, args[2], revision,
-                                                    withdraw, &removed);
-        if (result == SESSION_OK)
-            snprintf(detail, detail_capacity,
-                     "peer_id=%" PRIu32 " filename=%s revision=%" PRIu64 " reason=%s action=%s",
-                     id, args[2], revision, reason, removed ? "withdrawn" : "recorded");
-        return session_response(result);
-    }
     return REPLY_INVALID_COMMAND CRLF;
 }
 
@@ -217,7 +196,7 @@ static void *client_worker(void *argument)
         const char *response = REPLY_INVALID_COMMAND CRLF;
         file_match *matches = NULL;
         size_t match_count = 0;
-        char detail[PROTOCOL_FILENAME_TOKEN_MAX + 128] = "";
+        char detail[PROTOCOL_FILENAME_TOKEN_MAX + 64] = "";
         if (command != NULL && strcmp(command, CMD_GET) != 0) {
             response = dispatch(args.server, args.client, command, line, length, &matches, &match_count,
                                 &search_name, &username, detail, sizeof(detail));
@@ -229,11 +208,11 @@ static void *client_worker(void *argument)
 
         bool sent = true;
         for (size_t i = 0; sent && i < match_count; ++i) {
-            char record[PROTOCOL_FILENAME_TOKEN_MAX + 96];
+            char record[PROTOCOL_FILENAME_TOKEN_MAX + 64];
             int size = snprintf(record, sizeof(record),
-                                REPLY_CONTINUATION "%s %" PRIu64 " %" PRIu32 " %s %u %" PRIu64 CRLF,
+                                REPLY_CONTINUATION "%s %" PRIu64 " %" PRIu32 " %s %u" CRLF,
                                 search_name, matches[i].size, matches[i].client_id,
-                                matches[i].ip, (unsigned)matches[i].port, matches[i].revision);
+                                matches[i].ip, (unsigned)matches[i].port);
             sent = size > 0 && (size_t)size < sizeof(record) &&
                    send_all(fd, record, (size_t)size) >= 0;
         }

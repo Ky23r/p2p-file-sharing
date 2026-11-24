@@ -189,11 +189,11 @@ class ClientFileTests(unittest.TestCase):
         uploader = self.client()
         uploader.login()
         contents = bytes(range(256)) * 4097
-        self.share(uploader, "report +%.bin", contents)
+        self.share(uploader, "sample +%.bin", contents)
         self.share(uploader, "empty", b"")
         self.assertEqual(self.peer_get(uploader, "empty"), b"200 0\r\n")
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-            responses = list(pool.map(lambda _: self.peer_get(uploader, "report +%.bin"), range(8)))
+            responses = list(pool.map(lambda _: self.peer_get(uploader, "sample +%.bin"), range(8)))
         for response in responses:
             header, body = response.split(b"\r\n", 1)
             self.assertEqual(header, f"200 {len(contents)}".encode())
@@ -204,18 +204,18 @@ class ClientFileTests(unittest.TestCase):
         uploader.login()
         downloader.login()
         contents = b"hello\0world\n" * 10000
-        self.share(uploader, "report.bin", contents)
-        downloader.send("search report.bin")
+        self.share(uploader, "sample.bin", contents)
+        downloader.send("search sample.bin")
         row, = downloader.search_results()
-        self.assertIn("report.bin", row)
+        self.assertIn("sample.bin", row)
         downloader.send("download 1")
-        downloader.expect("Downloaded report.bin")
-        self.assertEqual((downloader.directory / "report.bin").read_bytes(), contents)
-        uploader.send("unshare report.bin")
+        downloader.expect("Downloaded sample.bin")
+        self.assertEqual((downloader.directory / "sample.bin").read_bytes(), contents)
+        uploader.send("unshare sample.bin")
         uploader.expect("200 UNSHARED")
-        downloader.send("search report.bin")
+        downloader.send("search sample.bin")
         self.assertEqual(downloader.search_results(), [])
-        self.assertEqual(self.peer_get(uploader, "report.bin"), b"550 File not shared\r\n")
+        self.assertEqual(self.peer_get(uploader, "sample.bin"), b"550 File not shared\r\n")
         uploader.send("logout")
         uploader.expect("200 LOGGED_OUT")
 
@@ -231,7 +231,7 @@ class ClientFileTests(unittest.TestCase):
 
     def result(self, peer_port, size, name="file.bin", identity=90):
         self.server.search_response = (f"200-{filename_token(name)} {size} "
-                                       f"{identity} 127.0.0.1 {peer_port} 1\r\n200 OK\r\n").encode()
+                                       f"{identity} 127.0.0.1 {peer_port}\r\n200 OK\r\n").encode()
 
     def search(self, client, query="file.bin"):
         client.send("search " + query)
@@ -378,23 +378,26 @@ class ClientFileTests(unittest.TestCase):
         source = client.directory / "file.bin"
         source.write_bytes(b"changed size")
         self.assertEqual(self.peer_get(client, "file.bin"), b"550 File size changed\r\n")
+        self.share(client, "file.bin", b"data")
         source.unlink()
         self.assertEqual(self.peer_get(client, "file.bin"), b"550 File unavailable\r\n")
+        self.share(client, "file.bin", b"data")
+        source.unlink()
         outside = self.directory / "outside"
         outside.write_bytes(b"secret")
         source.symlink_to(outside)
         self.assertEqual(self.peer_get(client, "file.bin"), b"550 File unavailable\r\n")
 
     def test_invalid_search_results_close_control_and_disable_serving(self):
-        row = b"200-file.bin 4 90 127.0.0.1 9001 1\r\n"
+        row = b"200-file.bin 4 90 127.0.0.1 9001\r\n"
         end = b"200 OK\r\n"
         responses = [b"200\r\n", b"200 OK\n", b"200 OK\x00bad\r\n",
-                     b"200-\r\n" + end, b"200- file.bin 4 90 127.0.0.1 9001 1\r\n" + end,
+                     b"200-\r\n" + end, b"200- file.bin 4 90 127.0.0.1 9001\r\n" + end,
                      row.replace(b"200-", b"250-") + end, row + b"250 OK\r\n",
                      row + row + end, row + row.replace(b" 90 ", b" 9 ") + end,
                      row.replace(b"127.0.0.1", b"999.1.1.1") + end,
                      row.replace(b"9001", b"0") + end,
-                     row.replace(b"9001 1", b"9001 0") + end,
+                     row.replace(b"9001", b"9001 extra") + end,
                      row.replace(b"file.bin", b"..") + end,
                      row.replace(b"file.bin", b"file.bin.backup") + end,
                      row.replace(b" 4 ", b" 18446744073709551616 ") + end,
@@ -412,7 +415,7 @@ class ClientFileTests(unittest.TestCase):
     def test_truncated_search_result_is_not_available_for_download(self):
         client = self.client()
         client.login()
-        self.server.search_response = b"200-file.bin 4 90 127.0.0.1 9001 1\r\n"
+        self.server.search_response = b"200-file.bin 4 90 127.0.0.1 9001\r\n"
         self.server.close_after_search = True
         client.send("search file.bin")
         client.expect(None)
@@ -500,6 +503,19 @@ class ClientFileTests(unittest.TestCase):
         client.send("quit")
         self.assertEqual(client.process.wait(timeout=5), 0)
 
+    def test_quit_interrupts_a_stalled_stale_share_withdrawal(self):
+        client = self.client()
+        client.login()
+        self.share(client, "file.bin", b"data")
+        (client.directory / "file.bin").unlink()
+
+        with self.server.lock:
+            with socket.create_connection(("127.0.0.1", client.peer_port), timeout=4) as peer:
+                peer.sendall(b"GET file.bin\r\n")
+                self.assertTrue(self.server.unshare_received.wait(timeout=4))
+                client.send("quit")
+                self.assertEqual(client.process.wait(timeout=5), 0)
+
     def test_rejected_logout_keeps_announced_files_available(self):
         client = self.client()
         client.login()
@@ -536,7 +552,7 @@ class ClientFileTests(unittest.TestCase):
     def test_search_accepts_more_than_128_results(self):
         client = self.client()
         client.login()
-        rows = "".join(f"200-file.bin 4 {identity} 127.0.0.1 9001 1\r\n" for identity in range(1, 141))
+        rows = "".join(f"200-file.bin 4 {identity} 127.0.0.1 9001\r\n" for identity in range(1, 141))
         self.server.search_response = (rows + "200 OK\r\n").encode()
         client.send("search file.bin")
         results = client.search_results()

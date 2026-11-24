@@ -57,53 +57,40 @@ address, and port. Use the result number with `download NUMBER`. The client
 prints `200 OK` when the search is complete. Terminal commands use lowercase.
 `help` and `quit` are local to the client. Both executables support `--help`.
 
-Local shares survive logout and restart. The client prints download failures,
-removes partial files, and reports peer failures to the server. The server
-withdraws the affected advertisement when the peer reports that a shared file
-is unavailable or has changed size. Connection and transfer errors are recorded
-for diagnosis. A completed download cannot overwrite an existing path. Ctrl+C
-or SIGTERM stops a pending download, restores terminal echo, and joins the
-client workers.
+Local shares survive logout and restart. The client prints download failures
+and removes partial files. When an upload request reveals a missing,
+inaccessible, or resized source, the owner withdraws that listing with
+`UNSHARE` and keeps its local catalog entry pending. A completed download
+cannot overwrite an existing path. Ctrl+C or SIGTERM stops a pending
+download, restores terminal echo, and joins the client workers.
 
 ## Protocol and storage
 
 Both channels use CRLF and case-insensitive command verbs. Replies begin with
-a three-digit numeric code. Search sends one `200-` continuation per result
-and ends with `200 OK`. Peer downloads start with `200 <size>` followed by the
-raw file bytes. The conventions follow the command and reply patterns of
-[FTP, RFC 959](https://www.rfc-editor.org/rfc/rfc959.html) and
-[SMTP, RFC 5321](https://www.rfc-editor.org/rfc/rfc5321.html). Upgrade the client
-and server together when switching wire formats. The full contract is in
-[docs/PROTOCOL.md](docs/PROTOCOL.md).
+a three-digit numeric code. Search sends one `200-` continuation with the
+filename, size, client ID, address, and port per result, then ends with
+`200 OK`. Peer downloads start with `200 <size>` followed by the raw file
+bytes. Upgrade the client and server together when switching wire formats.
+The full contract is in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 Account storage uses salted PBKDF2-HMAC-SHA256, private permissions, an
 exclusive lock, and a durable append before registration succeeds. Existing
 account records and local catalogs retain their format. The server logs
-connection activity, request outcomes, and download failure reports.
-The peer registry and file index live in memory. The server copies search
-matches under a mutex and sends them after releasing the lock.
+connection activity and request outcomes. The peer registry and file index
+live in memory. The server copies search matches under a mutex and sends
+them after releasing the lock.
 
 Use this IPv4 service on a controlled network. Credentials travel in plaintext.
 Socket timeouts bound inactivity, and available memory and OS resources govern
 how many independent sessions, entries, and bytes can be handled.
-
-## Coursework references
-
-HW1 supplied the dynamic input, account/session separation, and logging
-patterns. HW2 and HW3 reinforced validating addresses, ports, and input before
-acting, and checking socket results. HW4 demonstrated buffered line and binary
-reads through one TCP reader. HW5–HW7 reinforced CRLF framing, numeric
-responses, connection-scoped state, and cleanup, with pthreads in HW6 and
-poll-based socket and terminal handling in HW7.
 
 ## Verification
 
 `make test` runs C socket, protocol, and file tests alongside Python TCP
 integration tests. The cases include fragmented CRLF, pipelined requests, long
 input, mixed-case verbs, malformed replies, empty and interrupted multiline
-searches, concurrent sessions and index updates,
-restart and storage failure, exact binary transfers, stale advertisement
-withdrawal, and signal cleanup.
+searches, concurrent sessions and index updates, restart and storage failure,
+exact binary transfers, stale advertisement withdrawal, and signal cleanup.
 
 An AddressSanitizer and UndefinedBehaviorSanitizer build uses the same suite.
 

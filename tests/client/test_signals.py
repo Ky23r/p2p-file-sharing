@@ -165,7 +165,7 @@ class ClientSignalTests(unittest.TestCase):
         self.addCleanup(peer.close)
         filename = "cancelled.bin"
         self.server.search_response = (
-            f"200-{filename} 10 90 127.0.0.1 {peer.port} 1\r\n200 OK\r\n".encode())
+            f"200-{filename} 10 90 127.0.0.1 {peer.port}\r\n200 OK\r\n".encode())
         client.send("search " + filename)
         client.expect(b"200 OK\r\n")
         client.expect(b"p2p> ")

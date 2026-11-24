@@ -37,7 +37,7 @@ int shared_index_remove(SharedIndex *index, const char *name);
 bool shared_index_get(SharedIndex *index, size_t position, SharedFile *entry);
 /* Going offline revokes all announcements. Going online alone activates none. */
 void shared_index_set_online(SharedIndex *index, bool online);
-/* Update a known entry's announcement/advertised size; unknown name is ignored.
+/* Update a known entry's announcement. Size is used when announced is true.
  * Only set announced=true after the corresponding server acknowledgement.
  */
 void shared_index_mark(SharedIndex *index, const char *name, bool announced, uint64_t size);
@@ -51,5 +51,7 @@ int shared_file_open(const char *path, uint64_t *size);
  * for a changed size, or the source open error).
  */
 int shared_index_open(SharedIndex *index, const char *name, uint64_t *size);
+/* Whether a source open error confirms an announced file is stale. */
+bool shared_file_stale(int error);
 
 #endif

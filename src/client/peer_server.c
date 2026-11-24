@@ -29,6 +29,8 @@ struct PeerServer {
     bool stopping;
     size_t started;
     SharedIndex *index;
+    StaleShareHandler stale_share;
+    void *context;
     UploadWorker workers[UPLOAD_WORKERS];
 };
 
@@ -60,7 +62,7 @@ static void peer_error(int fd, const char *code)
     (void)send_all(fd, code, strlen(code));
 }
 
-static void serve_file(int fd, SharedIndex *index)
+static void serve_file(int fd, PeerServer *server)
 {
     net_reader reader;
     net_reader_init(&reader, fd);
@@ -87,26 +89,20 @@ static void serve_file(int fd, SharedIndex *index)
     if (received != NET_LINE_OK)
         return;
     uint64_t size;
-    int source = shared_index_open(index, name, &size);
+    int source = shared_index_open(server->index, name, &size);
     if (source < 0) {
-        switch (errno) {
-        case ENODATA:
+        int status = errno;
+        bool stale = shared_file_stale(status);
+        if (status == ENODATA)
             peer_error(fd, REPLY_FILE_NOT_SHARED CRLF);
-            break;
-        case ESTALE:
+        else if (status == ESTALE)
             peer_error(fd, REPLY_FILE_SIZE_CHANGED CRLF);
-            break;
-        case ENOENT:
-        case ENOTDIR:
-        case ELOOP:
-        case EINVAL:
-        case EACCES:
+        else if (stale)
             peer_error(fd, REPLY_FILE_UNAVAILABLE CRLF);
-            break;
-        default:
+        else
             peer_error(fd, REPLY_TEMPORARY_FILE_ERROR CRLF);
-            break;
-        }
+        if (stale && server->stale_share != NULL)
+            server->stale_share(server->context, name);
         return;
     }
     char header[64];
@@ -153,7 +149,7 @@ static void *upload_loop(void *argument)
         worker->fd = fd;
         pthread_mutex_unlock(&server->mutex);
         if (fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 && file_socket_timeout(fd) == 0)
-            serve_file(fd, server->index);
+            serve_file(fd, server);
         pthread_mutex_lock(&server->mutex);
         close(fd);
         worker->fd = -1;
@@ -162,13 +158,16 @@ static void *upload_loop(void *argument)
     return NULL;
 }
 
-PeerServer *peer_server_start(int listener, SharedIndex *index)
+PeerServer *peer_server_start(int listener, SharedIndex *index,
+                              StaleShareHandler stale_share, void *context)
 {
     PeerServer *server = calloc(1, sizeof(*server));
     if (server == NULL)
         return NULL;
     server->listener = listener;
     server->index = index;
+    server->stale_share = stale_share;
+    server->context = context;
     int error = pthread_mutex_init(&server->mutex, NULL);
     if (error != 0) {
         free(server);
