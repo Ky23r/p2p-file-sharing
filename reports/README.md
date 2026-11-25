@@ -1,6 +1,6 @@
 # Báo cáo tiến độ đề tài chia sẻ tệp P2P
 
-Cập nhật ngày 25/11/2026 cho nhánh `feature/client-core`. Báo cáo mô tả bản triển khai tại commit `26983ef`, gồm sửa lỗi hủy chia sẻ và cơ chế thử lại trên kết nối điều khiển. [Đặc tả giao thức](../docs/PROTOCOL.md) · [Hướng dẫn build và chạy](../README.md)
+Báo cáo ngày 25/11/2026 ghi lại bản triển khai tại commit `26983ef`, gồm sửa lỗi hủy chia sẻ và cơ chế thử lại trên kết nối điều khiển. Bản hợp nhất dùng lệnh `SHARE <client_id> <filename> <size>` và phản hồi tìm kiếm `200-` rồi `200 OK`, đồng thời giữ định dạng truyền tệp `200 CHUNKED`. Xem [đặc tả giao thức hiện hành](../docs/PROTOCOL.md) và [hướng dẫn build và chạy](../README.md).
 
 ## 1. Kiến trúc và tiến độ theo phân công
 
@@ -8,7 +8,7 @@ Hệ thống viết bằng C11, dùng IPv4/TCP và pthread, với Ubuntu 20.04 l
 
 ### Cao Trường Xuân (20236016) · Máy chủ và mạng chung
 
-| Hạng mục | Kết quả trên nhánh hiện tại |
+| Hạng mục | Kết quả tại `26983ef` |
 | --- | --- |
 | TCP và xử lý thông điệp | Máy chủ đa luồng xử lý lệnh theo dòng CRLF. Bộ đệm nhận xử lý được dòng bị chia nhỏ và nhiều lệnh đến trong cùng một lần đọc. |
 | Tài khoản | Đăng ký tài khoản, lưu mật khẩu băm bằng PBKDF2-HMAC-SHA256 có salt và xác thực đăng nhập theo kết nối. |
@@ -18,7 +18,7 @@ Hệ thống viết bằng C11, dùng IPv4/TCP và pthread, với Ubuntu 20.04 l
 
 ### Nguyễn Đức Thắng (20235998) · Máy khách và truyền tệp P2P
 
-| Hạng mục chấm | Điểm | Kết quả trên nhánh hiện tại |
+| Hạng mục chấm | Điểm | Kết quả tại `26983ef` |
 | --- | ---: | --- |
 | Giao tiếp qua socket | 2 | CLI trao đổi với máy chủ và peer qua TCP có bộ đệm. Bốn worker xử lý yêu cầu tải lên đồng thời. |
 | Công bố ID và cổng P2P | 1 | Máy khách lưu ID 32 bit trong `config.txt`, gửi `HELLO` sau đăng nhập và làm mới đăng ký mỗi 10 giây. |
