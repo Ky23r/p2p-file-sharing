@@ -69,8 +69,6 @@ Mỗi dòng phản hồi dưới đây kết thúc bằng CRLF trên đường t
 | --- | --- |
 | `200` | Lệnh thực hiện thành công. |
 | `201` | `REGISTER` đã tạo tài khoản. Kết nối tiếp tục ở trạng thái chưa đăng nhập. |
-| `200 END` | Kết thúc phản hồi `SEARCH` thành công, kể cả khi có 0 dòng `FILE`. |
-| `200 CHUNKED` | Peer chấp nhận `GET` và bắt đầu gửi dữ liệu theo khung. Lượt tải hoàn tất khi bên nhận đọc đủ khung `<end>`. |
 | `400` | Định dạng dòng, cú pháp, số lượng đối số hoặc giá trị không hợp lệ. |
 | `401` | Cần đăng nhập hoặc thông tin đăng nhập sai. Tài khoản không tồn tại và mật khẩu sai nhận cùng mã. |
 | `403` | Phiên cần `HELLO` thành công trước khi dùng lệnh quản lý tệp. |
