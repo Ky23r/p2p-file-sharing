@@ -36,20 +36,21 @@ static int download_temporary(int directory, char name[DOWNLOAD_TEMP_NAME_CAP])
     return -1;
 }
 
-static const char *receive_failure(void)
+static enum download_result receive_failure(void)
 {
-    return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT ? "TIMEOUT" : "TRANSFER_FAILED";
+    return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT ?
+        DOWNLOAD_TIMEOUT : DOWNLOAD_TRANSFER_FAILED;
 }
 
-static const char *receive_line_failure(int status)
+static enum download_result receive_line_failure(int status)
 {
     if (status == NET_LINE_ERROR)
         return receive_failure();
     errno = EPROTO;
-    return "TRANSFER_FAILED";
+    return DOWNLOAD_TRANSFER_FAILED;
 }
 
-static const char *receive_payload(net_reader *reader, int output, size_t length)
+static enum download_result receive_payload(net_reader *reader, int output, size_t length)
 {
     unsigned char buffer[FILE_CHUNK_MAX];
     size_t received = 0;
@@ -59,7 +60,7 @@ static const char *receive_payload(net_reader *reader, int output, size_t length
             return receive_failure();
         if (count == 0) {
             errno = ECONNRESET;
-            return "TRANSFER_FAILED";
+            return DOWNLOAD_TRANSFER_FAILED;
         }
         received += (size_t)count;
     }
@@ -71,24 +72,25 @@ static const char *receive_payload(net_reader *reader, int output, size_t length
         if (count <= 0) {
             if (count == 0)
                 errno = EIO;
-            return "LOCAL_ERROR";
+            return DOWNLOAD_LOCAL_ERROR;
         }
         written += (size_t)count;
     }
-    return NULL;
+    return DOWNLOAD_OK;
 }
 
-const char *download_file(const FileSearchResult *result, const char *directory, ClientSignals *signals)
+enum download_result download_file(const FileSearchResult *result, const char *directory,
+                                   ClientSignals *signals)
 {
     char token[FILE_NAME_TOKEN_CAP];
     if (!protocol_encode_filename(result->name, token, sizeof(token))) {
         errno = EINVAL;
-        return "LOCAL_ERROR";
+        return DOWNLOAD_LOCAL_ERROR;
     }
     int folder = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (folder < 0)
-        return "LOCAL_ERROR";
-    const char *failure = "LOCAL_ERROR";
+        return DOWNLOAD_LOCAL_ERROR;
+    enum download_result result_code = DOWNLOAD_LOCAL_ERROR;
     int peer = -1, output = -1;
     char *header = NULL;
     size_t capacity = 0;
@@ -107,13 +109,13 @@ const char *download_file(const FileSearchResult *result, const char *directory,
     }
     peer = file_connect(result->ip, result->port, signals);
     if (peer < 0) {
-        failure = errno == ETIMEDOUT || errno == EAGAIN ? "TIMEOUT" : "CONNECT_FAILED";
+        result_code = errno == ETIMEDOUT || errno == EAGAIN ? DOWNLOAD_TIMEOUT : DOWNLOAD_CONNECT_FAILED;
         goto finish;
     }
-    char request[FILE_NAME_TOKEN_CAP + sizeof("GET " CRLF)];
-    int length = snprintf(request, sizeof(request), "GET %s" CRLF, token);
+    char request[FILE_NAME_TOKEN_CAP + sizeof(CMD_GET " " CRLF)];
+    int length = snprintf(request, sizeof(request), CMD_GET " %s" CRLF, token);
     if (send_all(peer, request, (size_t)length) < 0) {
-        failure = receive_failure();
+        result_code = receive_failure();
         goto finish;
     }
     net_reader reader;
@@ -122,51 +124,53 @@ const char *download_file(const FileSearchResult *result, const char *directory,
     size_t header_length;
     int status = recv_line_bounded(&reader, &header, &capacity, &header_length, FILE_PEER_LINE_MAX);
     if (status != NET_LINE_OK) {
-        failure = receive_line_failure(status);
+        result_code = receive_line_failure(status);
         goto finish;
     }
     if (protocol_error(header, header_length)) {
         errno = EPROTO;
-        if (strcmp(header, STATUS_NOT_FOUND) == 0) {
-            failure = "NOT_FOUND";
+        if (strcmp(header, REPLY_FILE_UNAVAILABLE) == 0 || strcmp(header, REPLY_FILE_NOT_SHARED) == 0) {
+            result_code = DOWNLOAD_NOT_FOUND;
             errno = ENOENT;
+        } else if (strcmp(header, REPLY_FILE_SIZE_CHANGED) == 0) {
+            result_code = DOWNLOAD_SIZE_MISMATCH;
         } else {
-            failure = "TRANSFER_FAILED";
+            result_code = DOWNLOAD_TRANSFER_FAILED;
         }
         goto finish;
     }
     if (protocol_tokens(header, header_length, tokens, 2) != 2 || strcmp(tokens[0], STATUS_OK) != 0 ||
         strcmp(tokens[1], FILE_TRANSFER_MODE) != 0) {
-        failure = "TRANSFER_FAILED";
+        result_code = DOWNLOAD_TRANSFER_FAILED;
         errno = EPROTO;
         goto finish;
     }
     for (;;) {
         status = recv_line_bounded(&reader, &header, &capacity, &header_length, FILE_PEER_LINE_MAX);
         if (status != NET_LINE_OK) {
-            failure = receive_line_failure(status);
+            result_code = receive_line_failure(status);
             goto finish;
         }
         uint64_t amount;
         if (protocol_tokens(header, header_length, tokens, 2) != 2 ||
             !protocol_parse_uint64(tokens[1], FILE_CHUNK_MAX, &amount)) {
-            failure = "TRANSFER_FAILED";
+            result_code = DOWNLOAD_TRANSFER_FAILED;
             errno = EPROTO;
             goto finish;
         }
         bool final = strcmp(tokens[0], FILE_END_TAG) == 0;
         if (!final && (strcmp(tokens[0], FILE_DATA_TAG) != 0 || amount == 0)) {
-            failure = "TRANSFER_FAILED";
+            result_code = DOWNLOAD_TRANSFER_FAILED;
             errno = EPROTO;
             goto finish;
         }
-        failure = receive_payload(&reader, output, (size_t)amount);
-        if (failure != NULL)
+        result_code = receive_payload(&reader, output, (size_t)amount);
+        if (result_code != DOWNLOAD_OK)
             goto finish;
         if (final)
             break;
     }
-    failure = "LOCAL_ERROR";
+    result_code = DOWNLOAD_LOCAL_ERROR;
     if (client_signals_number(signals) != 0)
         goto finish;
     if (fsync(output) != 0)
@@ -175,12 +179,12 @@ const char *download_file(const FileSearchResult *result, const char *directory,
     output = -1;
     if (closed != 0 || linkat(folder, temporary, folder, result->name, 0) != 0)
         goto finish;
-    failure = NULL;
+    result_code = DOWNLOAD_OK;
 finish:;
     int error = errno;
     free(header);
-    if (failure != NULL && client_signals_number(signals) != 0) {
-        failure = "CANCELLED";
+    if (result_code != DOWNLOAD_OK && client_signals_number(signals) != 0) {
+        result_code = DOWNLOAD_CANCELLED;
         error = ECANCELED;
     }
     if (output >= 0)
@@ -191,5 +195,5 @@ finish:;
         unlinkat(folder, temporary, 0);
     close(folder);
     errno = error;
-    return failure;
+    return result_code;
 }

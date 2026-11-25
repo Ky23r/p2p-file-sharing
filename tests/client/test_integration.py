@@ -21,7 +21,7 @@ class ClientServerIntegrationTests(unittest.TestCase):
         self.addCleanup(self.server.stop)
         self.owner = self.client("owner", 20)
         self.owner.send(f"register alice\n{PASSWORD}")
-        self.owner.expect("201")
+        self.owner.expect("200 OK")
         self.owner.login()
         self.viewer = self.client("viewer", 10)
         self.viewer.login()
@@ -35,9 +35,9 @@ class ClientServerIntegrationTests(unittest.TestCase):
         client.send("search " + name)
         return client.search_results()
 
-    def expected_row(self, name, identity=20, port=None):
+    def expected_row(self, name, identity=20, port=None, number=1):
         port = self.owner.peer_port if port is None else port
-        return f"1: {name} (client {identity}, 127.0.0.1:{port})"
+        return f"{number}: {name} (client {identity}, 127.0.0.1:{port})"
 
     def share(self, name, contents):
         (self.owner.directory / name).write_bytes(contents)
@@ -46,7 +46,7 @@ class ClientServerIntegrationTests(unittest.TestCase):
 
     def test_two_clients_transfer_encoded_binary_and_empty_files(self):
         binary = bytes(range(256)) * 4097
-        for name, contents in (("report % +.bin", binary), ("empty +%.bin", b""),
+        for name, contents in (("sample % +.bin", binary), ("empty +%.bin", b""),
                                ("two chunks.bin", binary[:2 * 65536])):
             with self.subTest(name=name):
                 self.share(name, contents)
@@ -91,13 +91,13 @@ class ClientServerIntegrationTests(unittest.TestCase):
     def advertised_peer(self, filename, size):
         peer = self.server.connect()
         self.addCleanup(peer.close)
-        self.assertEqual(peer.command(f"LOGIN alice {PASSWORD}"), b"200")
+        self.assertEqual(peer.command(f"LOGIN alice {PASSWORD}"), b"200 OK")
         unavailable = socket.socket()
         self.addCleanup(unavailable.close)
         unavailable.bind(("127.0.0.1", 0))
         port = unavailable.getsockname()[1]  # Reserved without listening: connections are refused.
-        self.assertEqual(peer.command(f"HELLO 90 {port}"), b"200")
-        self.assertEqual(peer.command(f"SHARE {filename} {size}"), b"200")
+        self.assertEqual(peer.command(f"HELLO 90 {port}"), b"200 OK")
+        self.assertEqual(peer.command(f"SHARE 90 {filename} {size}"), b"200 OK")
         return peer, port
 
     def test_refused_download_keeps_advertisement(self):
@@ -112,6 +112,44 @@ class ClientServerIntegrationTests(unittest.TestCase):
         self.assertFalse((self.viewer.directory / name).exists())
         self.assertEqual(list(self.viewer.directory.glob(".p2p-download-*")), [])
 
+    def test_owner_withdraws_only_its_stale_share(self):
+        backup = self.client("backup", 30)
+        backup.login()
+        for name in ("missing.bin", "symlink.bin"):
+            with self.subTest(name=name):
+                self.share(name, b"data")
+                (backup.directory / name).write_bytes(b"backup")
+                backup.send("share " + name)
+                backup.expect("200 SHARED")
+                backup_row = self.expected_row(name, identity=30, port=backup.peer_port)
+                initial_rows = [self.expected_row(name),
+                                self.expected_row(name, identity=30, port=backup.peer_port, number=2)]
+                self.assertEqual(self.search(self.viewer, name), initial_rows)
+
+                source = self.owner.directory / name
+                source.unlink()
+                if name == "symlink.bin":
+                    source.symlink_to(backup.directory / name)
+                with socket.create_connection(("127.0.0.1", self.owner.peer_port), timeout=4) as peer:
+                    peer.sendall(f"GET {name}\r\n".encode())
+                    with peer.makefile("rb") as reply:
+                        self.assertEqual(reply.read(), b"550 File unavailable\r\n")
+
+                self.assertEqual(self.search(self.viewer, name), [backup_row])
+                self.owner.send("shares")
+                self.owner.expect(f"SHARE {name} 4 PENDING")
+                log = self.server.accounts.with_suffix(".db.log").read_text()
+                self.assertIn(f"command=UNSHARE result=200 filename={name}", log)
+                self.viewer.send("download 1")
+                self.viewer.expect("Downloaded " + name)
+                self.assertEqual((self.viewer.directory / name).read_bytes(), b"backup")
+                if source.is_symlink():
+                    source.unlink()
+                self.share(name, b"restored")
+                self.assertEqual(self.search(self.viewer, name), initial_rows)
+                self.owner.send("unshare " + name)
+                self.owner.expect("200 UNSHARED")
+
     def test_search_accepts_maximum_file_size_without_displaying_it(self):
         maximum = 18446744073709551615
         _, port = self.advertised_peer("huge.bin", maximum)
@@ -120,7 +158,7 @@ class ClientServerIntegrationTests(unittest.TestCase):
         self.assertIsNone(self.viewer.process.poll())
         self.assertEqual(self.search(self.viewer, "absent.bin"), [])
 
-    def test_legacy_non_ascii_catalog_entry_stays_pending_and_can_be_removed(self):
+    def test_existing_non_ascii_catalog_entry_can_be_downloaded_and_removed(self):
         directory = self.directory / "legacy"
         directory.mkdir()
         name = "báo cáo.bin"
@@ -133,10 +171,15 @@ class ClientServerIntegrationTests(unittest.TestCase):
 
         client = self.client("legacy", 30)
         client.login()
+        client.expect("200 SHARED")
         client.send("shares")
-        client.expect(f"SHARE {name} {len(contents)} PENDING")
+        client.expect(f"SHARE {name} {len(contents)} ANNOUNCED")
         self.assertEqual(catalog.read_bytes(), original)
-        self.assertIn("filenames must be printable ASCII", client.errors())
+        self.assertEqual(self.search(self.viewer, name),
+                         [self.expected_row(name, identity=30, port=client.peer_port)])
+        self.viewer.send("download 1")
+        self.viewer.expect("Downloaded " + name)
+        self.assertEqual((self.viewer.directory / name).read_bytes(), contents)
         client.send("unshare " + name)
         client.expect("200 UNSHARED")
         self.assertEqual(catalog.read_bytes(), b"")

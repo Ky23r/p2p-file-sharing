@@ -28,6 +28,8 @@ struct PeerServer {
     bool stopping;
     size_t started;
     SharedIndex *index;
+    StaleShareHandler stale_share;
+    void *context;
     UploadWorker workers[UPLOAD_WORKERS];
 };
 
@@ -88,7 +90,7 @@ static void send_file(int peer, int source)
         bool final = following == 0;
         char header[32];
         int length = snprintf(header, sizeof(header), "%s %zd" CRLF,
-                          final ? FILE_END_TAG : FILE_DATA_TAG, bytes);
+                              final ? FILE_END_TAG : FILE_DATA_TAG, bytes);
         if (send_all(peer, header, (size_t)length) < 0 ||
             send_all(peer, chunks[current], (size_t)bytes) < 0 || final)
             return;
@@ -97,7 +99,7 @@ static void send_file(int peer, int source)
     }
 }
 
-static void serve_file(int fd, SharedIndex *index)
+static void serve_file(int fd, PeerServer *server)
 {
     net_reader reader;
     net_reader_init(&reader, fd);
@@ -106,13 +108,16 @@ static void serve_file(int fd, SharedIndex *index)
     int received = recv_line_bounded(&reader, &line, &capacity, &length, FILE_PEER_LINE_MAX);
     char *tokens[2], name[FILE_NAME_CAP];
     const char *error = NULL;
-    if (received == NET_LINE_INVALID || received == NET_LINE_TOO_LONG ||
-        (received == NET_LINE_OK &&
-         (protocol_tokens(line, length, tokens, 2) != 2 ||
-          !protocol_decode_filename(tokens[1], name, sizeof(name)))))
-        error = STATUS_BAD_REQUEST CRLF;
-    else if (received == NET_LINE_OK && strcmp(tokens[0], "GET") != 0)
-        error = STATUS_UNKNOWN_COMMAND CRLF;
+    if (received == NET_LINE_INVALID || received == NET_LINE_TOO_LONG) {
+        error = REPLY_INVALID_COMMAND CRLF;
+    } else if (received == NET_LINE_OK) {
+        const char *command = protocol_command(line, length);
+        if (command == NULL || strcmp(command, CMD_GET) != 0)
+            error = REPLY_INVALID_COMMAND CRLF;
+        else if (protocol_tokens(line, length, tokens, 2) != 2 ||
+                 !protocol_decode_filename(tokens[1], name, sizeof(name)))
+            error = REPLY_INVALID_ARGUMENTS CRLF;
+    }
     free(line);
     if (error != NULL) {
         peer_error(fd, error);
@@ -120,9 +125,18 @@ static void serve_file(int fd, SharedIndex *index)
     }
     if (received != NET_LINE_OK)
         return;
-    int source = shared_index_open(index, name);
+    int source = shared_index_open(server->index, name);
     if (source < 0) {
-        peer_error(fd, STATUS_NOT_FOUND CRLF);
+        int status = errno;
+        bool stale = shared_file_stale(status);
+        if (status == ENODATA)
+            peer_error(fd, REPLY_FILE_NOT_SHARED CRLF);
+        else if (stale)
+            peer_error(fd, REPLY_FILE_UNAVAILABLE CRLF);
+        else
+            peer_error(fd, REPLY_TEMPORARY_FILE_ERROR CRLF);
+        if (stale && server->stale_share != NULL)
+            server->stale_share(server->context, name);
         return;
     }
     send_file(fd, source);
@@ -155,7 +169,7 @@ static void *upload_loop(void *argument)
         worker->fd = fd;
         pthread_mutex_unlock(&server->mutex);
         if (fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 && file_socket_timeout(fd) == 0)
-            serve_file(fd, server->index);
+            serve_file(fd, server);
         pthread_mutex_lock(&server->mutex);
         close(fd);
         worker->fd = -1;
@@ -164,13 +178,16 @@ static void *upload_loop(void *argument)
     return NULL;
 }
 
-PeerServer *peer_server_start(int listener, SharedIndex *index)
+PeerServer *peer_server_start(int listener, SharedIndex *index,
+                              StaleShareHandler stale_share, void *context)
 {
     PeerServer *server = calloc(1, sizeof(*server));
     if (server == NULL)
         return NULL;
     server->listener = listener;
     server->index = index;
+    server->stale_share = stale_share;
+    server->context = context;
     int error = pthread_mutex_init(&server->mutex, NULL);
     if (error != 0) {
         free(server);

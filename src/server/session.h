@@ -14,9 +14,8 @@ typedef struct session {
     int fd;
     bool authenticated;
     uint32_t client_id;
-    uint16_t port;
+    uint16_t port;  /* A nonzero port stages HELLO. Login makes it active. */
     char ip[INET_ADDRSTRLEN];
-    bool peer_registered;
     shared_file *files;
     pthread_t thread;
     bool finished;
@@ -40,7 +39,7 @@ typedef struct {
 
 enum session_result {
     SESSION_OK, SESSION_UNAUTHORIZED, SESSION_ID_IN_USE, SESSION_HELLO_REQUIRED,
-    SESSION_FILE_NOT_FOUND, SESSION_ERROR
+    SESSION_WRONG_CLIENT, SESSION_FILE_NOT_FOUND, SESSION_ERROR
 };
 int session_manager_init(session_manager *manager);
 void session_manager_destroy(session_manager *manager);
@@ -55,7 +54,7 @@ void session_reap(session_manager *manager);
 /* Stops additions, interrupts socket I/O, waits for owners, joins all workers. */
 void session_shutdown(session_manager *manager);
 bool session_authenticated(session_manager *manager, const session *client);
-void session_login(session_manager *manager, session *client);
+enum session_result session_login(session_manager *manager, session *client);
 bool session_logout(session_manager *manager, session *client);
 enum session_result session_hello(session_manager *manager, session *client,
                                   uint32_t id, uint16_t port);
@@ -65,7 +64,7 @@ enum session_result session_hello(session_manager *manager, session *client,
  * logout and disconnect. No socket/log I/O occurs under that mutex.
  */
 enum session_result session_share(session_manager *manager, session *client,
-                                  const char *filename, uint64_t size);
+                                  uint32_t id, const char *filename, uint64_t size);
 enum session_result session_unshare(session_manager *manager, session *client,
                                     const char *filename);
 /* Caller frees the snapshot. Zero results sets matches=NULL and count=0.

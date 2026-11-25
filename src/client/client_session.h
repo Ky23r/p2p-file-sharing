@@ -6,8 +6,8 @@
 enum request_result { REQUEST_FAILED = -1, REQUEST_REJECTED, REQUEST_OK };
 typedef struct ClientSession ClientSession;
 
-/* Main-thread command interface. Exchanges are serialized with the background
- * keepalive; do not call stop concurrently with a public operation. Commands
+/* Main-thread command interface. Exchanges are serialized with keepalive and
+ * stale-share withdrawals. Do not free the session during an exchange. Commands
  * print their protocol/CLI status. REQUEST_OK means the operation completed;
  * REQUEST_REJECTED is a recoverable input/server/local-storage rejection;
  * REQUEST_FAILED is terminal (connection failure or requested cancellation).
@@ -20,19 +20,24 @@ typedef struct ClientSession ClientSession;
  */
 ClientSession *client_session_start(int fd, uint32_t id, uint16_t port,
                                     SharedIndex *index, const char *downloads, ClientSignals *signals);
+/* Interrupt control I/O before joining peer workers that borrow the session. */
+void client_session_interrupt(ClientSession *client);
 /* Shut down (but do not close) fd, revoke serving/results, join the keepalive,
  * and free the session. NULL is safe. Other borrowed resources remain owned by
  * the caller; destroy the index/signals only after all users have stopped.
  */
 void client_session_stop(ClientSession *client);
 
-/* request includes LF; expected excludes LF. One complete exchange; validates
- * success exactly and accepts well-formed numeric error codes as recoverable rejections.
+/* Stage the client ID and listening port before reading terminal commands. */
+enum request_result client_stage_hello(ClientSession *client);
+/* The request is a complete REGISTER or LOGIN line, including CRLF. The
+ * request buffer is wiped before a successful login republishes saved shares.
  */
-enum request_result client_exchange(ClientSession *client, const char *request, const char *expected);
+enum request_result client_account(ClientSession *client, char *request, size_t capacity,
+                                   bool registering);
 
-/* Announce peer and republish readable local shares. Individual SHARE rejections
- * leave those entries pending; a rejected HELLO preserves the prior state.
+/* Stage or refresh the announcement. When logged in, republish readable shares.
+ * Individual SHARE rejections leave those entries pending.
  */
 enum request_result client_hello(ClientSession *client);
 /* Acknowledged logout or terminal control failure revokes serving/results;
@@ -48,12 +53,14 @@ enum request_result client_share(ClientSession *client, const char *path);
  * saving local removal. A failed save retains an inactive entry for retry.
  */
 enum request_result client_unshare(ClientSession *client, const char *name);
+/* Upload worker callback. Recheck the share and withdraw it if still stale. */
+void client_withdraw_stale_share(void *context, const char *name);
 /* Clear the previous selection, search an exact filename, and publish numbered
  * results after validation. Invalid/truncated responses fail the connection.
  */
 enum request_result client_search(ClientSession *client, const char *query);
-/* number selects the latest search. Report remote failures only; cancellation
- * and local destination errors never accuse the peer. Never overwrite a file.
+/* number selects the latest search. Download failures print a local diagnostic.
+ * A download never overwrites an existing file.
  */
 enum request_result client_download(ClientSession *client, const char *number);
 /* Print snapshots of desired local shares and their current announcement state. */

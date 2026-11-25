@@ -75,123 +75,105 @@ static bool decimal(const char *text, uint32_t maximum, uint32_t *value)
     return true;
 }
 
-static const char *auth_response(enum auth_result result, bool registering)
+static const char *auth_response(enum auth_result result)
 {
     switch (result) {
-    case AUTH_OK: return registering ? STATUS_CREATED CRLF : STATUS_OK CRLF;
-    case AUTH_INVALID: return STATUS_BAD_REQUEST CRLF;
-    case AUTH_USER_EXISTS: return STATUS_CONFLICT CRLF;
-    case AUTH_BAD_CREDENTIALS: return STATUS_UNAUTHORIZED CRLF;
-    case AUTH_ERROR: return STATUS_ERROR CRLF;
+    case AUTH_OK: return REPLY_OK CRLF;
+    case AUTH_INVALID: return REPLY_INVALID_ARGUMENTS CRLF;
+    case AUTH_USER_EXISTS: return REPLY_ACCOUNT_EXISTS CRLF;
+    case AUTH_BAD_CREDENTIALS: return REPLY_BAD_CREDENTIALS CRLF;
+    case AUTH_ERROR: return REPLY_PROCESSING_ERROR CRLF;
     }
-    return STATUS_ERROR CRLF;
+    return REPLY_PROCESSING_ERROR CRLF;
 }
 
-static const char *file_response(enum session_result result, const char *success)
+static const char *session_response(enum session_result result)
 {
     switch (result) {
-    case SESSION_OK: return success;
-    case SESSION_UNAUTHORIZED: return STATUS_UNAUTHORIZED CRLF;
-    case SESSION_HELLO_REQUIRED: return STATUS_FORBIDDEN CRLF;
-    case SESSION_FILE_NOT_FOUND: return STATUS_NOT_FOUND CRLF;
-    default: return STATUS_ERROR CRLF;
+    case SESSION_OK: return REPLY_OK CRLF;
+    case SESSION_UNAUTHORIZED: return REPLY_LOGIN_REQUIRED CRLF;
+    case SESSION_ID_IN_USE: return REPLY_CLIENT_ID_IN_USE CRLF;
+    case SESSION_WRONG_CLIENT: return REPLY_CLIENT_ID_MISMATCH CRLF;
+    case SESSION_HELLO_REQUIRED: return REPLY_BAD_SEQUENCE CRLF;
+    case SESSION_FILE_NOT_FOUND: return REPLY_FILE_NOT_SHARED CRLF;
+    default: return REPLY_PROCESSING_ERROR CRLF;
     }
-}
-
-/* Only fixed command labels may reach the log. Malformed input and account
- * arguments (especially passwords) must never be logged verbatim.
- */
-static const char *command_label(const char *line, size_t length)
-{
-    static const char *const commands[] = {
-        "REGISTER", "LOGIN", "HELLO", "LOGOUT", "SHARE", "UNSHARE", "SEARCH"
-    };
-    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
-        size_t size = strlen(commands[i]);
-        if (length >= size && memcmp(line, commands[i], size) == 0 &&
-            (length == size || line[size] == ' '))
-            return commands[i];
-    }
-    return "UNKNOWN";
 }
 
 /* A successful SEARCH supplies its filename token and a snapshot to send. */
-static const char *dispatch(server_state *server, session *client, char *line, size_t length,
+static const char *dispatch(server_state *server, session *client, const char *command,
+                            char *line, size_t length,
                             file_match **matches, size_t *match_count,
                             const char **search_name, const char **username,
                             char *detail, size_t detail_capacity)
 {
-    char *args[3];
-    size_t count = protocol_tokens(line, length, args, 3);
+    char *args[4];
+    size_t count = protocol_tokens(line, length, args, sizeof(args) / sizeof(args[0]));
     if (count == 0)
-        return STATUS_BAD_REQUEST CRLF;
+        return REPLY_INVALID_ARGUMENTS CRLF;
 
-    if (strcmp(args[0], "REGISTER") == 0 || strcmp(args[0], "LOGIN") == 0) {
+    if (strcmp(command, CMD_REGISTER) == 0 || strcmp(command, CMD_LOGIN) == 0) {
         if (count != 3 || !protocol_valid_username(args[1]) || !protocol_valid_password(args[2]))
-            return STATUS_BAD_REQUEST CRLF;
+            return REPLY_INVALID_ARGUMENTS CRLF;
         if (session_authenticated(&server->sessions, client))
-            return STATUS_CONFLICT CRLF;
-        bool registering = strcmp(args[0], "REGISTER") == 0;
+            return REPLY_BAD_SEQUENCE CRLF;
+        bool registering = strcmp(command, CMD_REGISTER) == 0;
         enum auth_result result = registering ? auth_register(&server->auth, args[1], args[2]) :
                                                auth_login(&server->auth, args[1], args[2]);
         if (result == AUTH_OK) {
+            if (!registering) {
+                enum session_result login = session_login(&server->sessions, client);
+                if (login != SESSION_OK)
+                    return session_response(login);
+            }
             *username = args[1];
-            if (!registering)
-                session_login(&server->sessions, client);
         }
-        return auth_response(result, registering);
+        return auth_response(result);
     }
-    if (strcmp(args[0], "HELLO") == 0) {
+    if (strcmp(command, CMD_HELLO) == 0) {
         uint32_t id, port;
         if (count != 3 || !decimal(args[1], UINT32_MAX, &id) ||
             !decimal(args[2], UINT16_MAX, &port) || port == 0)
-            return STATUS_BAD_REQUEST CRLF;
+            return REPLY_INVALID_ARGUMENTS CRLF;
         enum session_result result = session_hello(&server->sessions, client, id, (uint16_t)port);
-        if (result == SESSION_UNAUTHORIZED)
-            return STATUS_UNAUTHORIZED CRLF;
-        if (result == SESSION_ID_IN_USE)
-            return STATUS_CONFLICT CRLF;
-        snprintf(detail, detail_capacity, "client_id=%" PRIu32 " port=%u", id, (unsigned)port);
-        return STATUS_OK CRLF;
+        if (result == SESSION_OK)
+            snprintf(detail, detail_capacity, "client_id=%" PRIu32 " port=%u", id, (unsigned)port);
+        return session_response(result);
     }
-    if (strcmp(args[0], "LOGOUT") == 0) {
+    if (strcmp(command, CMD_LOGOUT) == 0) {
         if (count != 1)
-            return STATUS_BAD_REQUEST CRLF;
-        return session_logout(&server->sessions, client) ? STATUS_OK CRLF : STATUS_UNAUTHORIZED CRLF;
+            return REPLY_INVALID_ARGUMENTS CRLF;
+        return session_logout(&server->sessions, client) ? REPLY_OK CRLF : REPLY_LOGIN_REQUIRED CRLF;
     }
-    if (strcmp(args[0], "SHARE") == 0 || strcmp(args[0], "UNSHARE") == 0 ||
-        strcmp(args[0], "SEARCH") == 0) {
-        bool sharing = strcmp(args[0], "SHARE") == 0;
-        bool searching = strcmp(args[0], "SEARCH") == 0;
-        char decoded[PROTOCOL_FILENAME_MAX + 1];
-        uint64_t size = 0;
-        if (count != (sharing ? 3U : 2U) ||
-            !protocol_decode_filename(args[1], decoded, sizeof(decoded)) ||
-            (sharing && !protocol_parse_uint64(args[2], UINT64_MAX, &size)))
-            return STATUS_BAD_REQUEST CRLF;
-        enum session_result result;
-        const char *success;
-        if (sharing) {
-            result = session_share(&server->sessions, client, args[1], size);
-            success = STATUS_OK CRLF;
-        } else if (searching) {
-            result = session_search(&server->sessions, client, args[1], matches, match_count);
-            if (result == SESSION_OK)
-                *search_name = args[1];
-            success = STATUS_SEARCH_END CRLF;
-        } else {
-            result = session_unshare(&server->sessions, client, args[1]);
-            success = STATUS_OK CRLF;
-        }
+    char decoded[PROTOCOL_FILENAME_MAX + 1];
+    if (strcmp(command, CMD_SHARE) == 0) {
+        uint32_t id;
+        uint64_t size;
+        if (count != 4 || !decimal(args[1], UINT32_MAX, &id) ||
+            !protocol_decode_filename(args[2], decoded, sizeof(decoded)) ||
+            !protocol_parse_uint64(args[3], UINT64_MAX, &size))
+            return REPLY_INVALID_ARGUMENTS CRLF;
+        enum session_result result = session_share(&server->sessions, client, id, args[2], size);
+        if (result == SESSION_OK)
+            snprintf(detail, detail_capacity, "client_id=%" PRIu32 " filename=%s size=%" PRIu64,
+                     id, args[2], size);
+        return session_response(result);
+    }
+    if (strcmp(command, CMD_UNSHARE) == 0 || strcmp(command, CMD_SEARCH) == 0) {
+        if (count != 2 || !protocol_decode_filename(args[1], decoded, sizeof(decoded)))
+            return REPLY_INVALID_ARGUMENTS CRLF;
+        bool searching = strcmp(command, CMD_SEARCH) == 0;
+        enum session_result result = searching ?
+            session_search(&server->sessions, client, args[1], matches, match_count) :
+            session_unshare(&server->sessions, client, args[1]);
         if (result == SESSION_OK) {
-            if (sharing)
-                snprintf(detail, detail_capacity, "filename=%s size=%" PRIu64, args[1], size);
-            else
-                snprintf(detail, detail_capacity, "filename=%s", args[1]);
+            if (searching)
+                *search_name = args[1];
+            snprintf(detail, detail_capacity, "filename=%s", args[1]);
         }
-        return file_response(result, success);
+        return session_response(result);
     }
-    return STATUS_UNKNOWN_COMMAND CRLF;
+    return REPLY_INVALID_COMMAND CRLF;
 }
 
 static void *client_worker(void *argument)
@@ -209,18 +191,18 @@ static void *client_worker(void *argument)
         if (result != NET_LINE_OK && result != NET_LINE_INVALID)
             break;
 
-        const char *command = "UNKNOWN", *username = NULL, *search_name = NULL;
-        const char *response = STATUS_BAD_REQUEST CRLF;
+        const char *command = result == NET_LINE_OK ? protocol_command(line, length) : NULL;
+        const char *username = NULL, *search_name = NULL;
+        const char *response = REPLY_INVALID_COMMAND CRLF;
         file_match *matches = NULL;
         size_t match_count = 0;
         char detail[PROTOCOL_FILENAME_TOKEN_MAX + 64] = "";
-        if (result == NET_LINE_OK) {
-            command = command_label(line, length);
-            response = dispatch(args.server, args.client, line, length, &matches, &match_count,
+        if (command != NULL && strcmp(command, CMD_GET) != 0) {
+            response = dispatch(args.server, args.client, command, line, length, &matches, &match_count,
                                 &search_name, &username, detail, sizeof(detail));
         }
         service_log_write(&args.server->log, "REQUEST fd=%d ip=%s command=%s result=%.3s%s%s%s%s",
-                          fd, args.client->ip, command, response,
+                          fd, args.client->ip, command != NULL ? command : "UNKNOWN", response,
                           username != NULL ? " username=" : "", username != NULL ? username : "",
                           *detail != '\0' ? " " : "", detail);
 
@@ -228,7 +210,7 @@ static void *client_worker(void *argument)
         for (size_t i = 0; sent && i < match_count; ++i) {
             char record[PROTOCOL_FILENAME_TOKEN_MAX + 64];
             int size = snprintf(record, sizeof(record),
-                                "FILE %s %" PRIu64 " %" PRIu32 " %s %u" CRLF,
+                                REPLY_CONTINUATION "%s %" PRIu64 " %" PRIu32 " %s %u" CRLF,
                                 search_name, matches[i].size, matches[i].client_id,
                                 matches[i].ip, (unsigned)matches[i].port);
             sent = size > 0 && (size_t)size < sizeof(record) &&
@@ -319,14 +301,14 @@ static void accept_client(int listener, server_state *server)
     }
     session *client = session_add(&server->sessions, fd, ip);
     if (client == NULL) {
-        static const char response[] = STATUS_BUSY CRLF;
+        static const char response[] = REPLY_SERVICE_UNAVAILABLE CRLF;
         (void)send_all(fd, response, sizeof(response) - 1);
         close(fd);
         return;
     }
     worker_args *args = malloc(sizeof(*args));
     if (args == NULL) {
-        static const char response[] = STATUS_BUSY CRLF;
+        static const char response[] = REPLY_SERVICE_UNAVAILABLE CRLF;
         (void)send_all(fd, response, sizeof(response) - 1);
         session_remove(&server->sessions, client);
         return;
@@ -347,7 +329,7 @@ static void accept_client(int listener, server_state *server)
     }
     if (error != 0) {
         free(args);
-        static const char response[] = STATUS_BUSY CRLF;
+        static const char response[] = REPLY_SERVICE_UNAVAILABLE CRLF;
         (void)send_all(fd, response, sizeof(response) - 1);
         session_remove(&server->sessions, client);
     }

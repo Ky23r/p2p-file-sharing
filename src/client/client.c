@@ -12,7 +12,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -48,17 +47,17 @@ static void usage(FILE *stream, const char *program)
 
 static void commands(void)
 {
-    puts("register USER   Register an account\n"
-         "login USER      Log in and announce the peer port\n"
-         "hello           Announce the client ID and peer port again\n"
-         "logout          Log out and keep the connection open\n"
-         "share PATH      Save and announce a local file (spaces allowed)\n"
-         "unshare NAME    Stop sharing a filename\n"
-         "shares          List local shares and announcement state\n"
-         "search NAME     Find available peers by exact filename\n"
-         "download NUMBER Download a result from the latest search\n"
-         "help            Show commands\n"
-         "quit            Close the connection and exit");
+    puts("register USER    Create an account\n"
+         "login USER       Log in and publish saved shares\n"
+         "hello            Refresh the peer announcement and retry saved shares\n"
+         "logout           Log out and release the client ID\n"
+         "share PATH       Save a local file and advertise it when logged in\n"
+         "unshare NAME     Remove an advertisement and its local catalog entry\n"
+         "shares           List local files as pending or announced\n"
+         "search NAME      Find peers that share the exact filename\n"
+         "download NUMBER  Download a result from the latest search\n"
+         "help             Show commands\n"
+         "quit             Close the connection and exit");
 }
 
 static bool parse_port(const char *text, uint16_t *port)
@@ -228,7 +227,7 @@ static enum request_result account_command(ClientSession *server, bool registeri
         return REQUEST_REJECTED;
     }
 
-    const char *command = registering ? "REGISTER" : "LOGIN";
+    const char *command = registering ? CMD_REGISTER : CMD_LOGIN;
     size_t length = strlen(command) + strlen(username) + strlen(password) + sizeof("  " CRLF);
     char *request = malloc(length);
     if (request != NULL)
@@ -239,8 +238,7 @@ static enum request_result account_command(ClientSession *server, bool registeri
         perror("Preparing account request");
         return REQUEST_FAILED;
     }
-    enum request_result result = client_exchange(server, request, registering ? STATUS_CREATED : STATUS_OK);
-    OPENSSL_cleanse(request, length);
+    enum request_result result = client_account(server, request, length, registering);
     free(request);
     return result;
 }
@@ -290,8 +288,6 @@ static int run_client(ClientSession *server, uint32_t id, uint16_t peer_port, Cl
         enum request_result result = REQUEST_REJECTED;
         if (registering || strcmp(line, "login") == 0) {
             result = account_command(server, registering, argument, interactive, &input_context);
-            if (!registering && result == REQUEST_OK)
-                result = client_hello(server);
         } else if (strcmp(line, "share") == 0) {
             result = client_share(server, argument);
         } else if (strcmp(line, "unshare") == 0) {
@@ -337,10 +333,8 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    struct sockaddr_in address = {0};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(options.server_port);
-    if (inet_pton(AF_INET, options.ip, &address.sin_addr) != 1) {
+    struct in_addr address;
+    if (inet_pton(AF_INET, options.ip, &address) != 1) {
         fputs("Invalid server IPv4 address.\n", stderr);
         return EXIT_FAILURE;
     }
@@ -372,11 +366,6 @@ int main(int argc, char **argv)
         fprintf(stderr, "Shared-file index %s: %s\n", options.index, strerror(errno));
         goto cleanup;
     }
-    peers = peer_server_start(peer_listener, index);
-    if (peers == NULL) {
-        perror("Starting peer workers");
-        goto cleanup;
-    }
     fd = file_connect(options.ip, options.server_port, signals);
     if (fd < 0) {
         fprintf(stderr, "Connecting to %s:%u: %s\n", options.ip,
@@ -388,14 +377,22 @@ int main(int argc, char **argv)
     /* Input polling must see every byte, including redirected multi-line input. */
     setvbuf(stdin, NULL, _IONBF, 0);
     server = client_session_start(fd, id, options.peer_port, index, options.downloads, signals);
-    if (server == NULL)
+    if (server == NULL) {
         perror("Starting control session");
-    else
+        goto cleanup;
+    }
+    peers = peer_server_start(peer_listener, index, client_withdraw_stale_share, server);
+    if (peers == NULL) {
+        perror("Starting peer workers");
+        goto cleanup;
+    }
+    if (client_stage_hello(server) == REQUEST_OK)
         result = run_client(server, id, options.peer_port, signals);
 cleanup:
+    client_session_interrupt(server);
+    peer_server_stop(peers);
     client_session_stop(server);
     client_signals_close_socket(signals, fd);
-    peer_server_stop(peers);
     shared_index_destroy(index);
     if (peer_listener >= 0)
         close(peer_listener);

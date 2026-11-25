@@ -39,8 +39,6 @@ bool file_hex_encode(const char *text, char *encoded, size_t capacity);
  * includes NUL; failure may leave a partly written, unusable output buffer.
  */
 bool file_hex_decode(const char *encoded, char *text, size_t capacity);
-/* Validate local catalog basenames, including legacy non-ASCII names. */
-bool file_name_valid(const char *name);
 /* Decode a local catalog's hex basename into FILE_NAME_CAP caller-owned bytes. */
 bool file_name_decode(const char *encoded, char name[FILE_NAME_CAP]);
 /* Returned socket is caller-owned and watched when signals is non-NULL. Close

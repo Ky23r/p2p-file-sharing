@@ -57,7 +57,7 @@ int main(void)
     struct sockaddr_in address;
     socklen_t address_size = sizeof(address);
     assert(getsockname(listener, (struct sockaddr *)&address, &address_size) == 0);
-    PeerServer *server = peer_server_start(listener, index);
+    PeerServer *server = peer_server_start(listener, index, NULL, NULL);
     assert(server != NULL);
     int peer = file_connect("127.0.0.1", ntohs(address.sin_port), NULL);
     assert(peer >= 0);
@@ -89,18 +89,18 @@ int main(void)
     FileSearchResult result = {.client_id = 7, .ip = "127.0.0.1",
                                .port = ntohs(address.sin_port)};
     strcpy(result.name, name);
-    assert(download_file(&result, downloads, NULL) == NULL);
+    assert(download_file(&result, downloads, NULL) == DOWNLOAD_OK);
     struct stat downloaded;
     assert(stat(destination, &downloaded) == 0 && (downloaded.st_mode & 0777) == 0600);
     fd = open(destination, O_RDONLY);
     assert(fd >= 0 && read(fd, body, sizeof(body)) == 4 && memcmp(body, "x\0\ny", 4) == 0);
     close(fd);
-    assert(strcmp(download_file(&result, downloads, NULL), "LOCAL_ERROR") == 0 && errno == EEXIST);
+    assert(download_file(&result, downloads, NULL) == DOWNLOAD_LOCAL_ERROR && errno == EEXIST);
     assert(unlink(destination) == 0);
     fd = open(source, O_WRONLY | O_TRUNC);
     assert(fd >= 0 && write(fd, "new", 3) == 3);
     close(fd);
-    assert(download_file(&result, downloads, NULL) == NULL);
+    assert(download_file(&result, downloads, NULL) == DOWNLOAD_OK);
     fd = open(destination, O_RDONLY);
     assert(fd >= 0 && read(fd, body, sizeof(body)) == 3 && memcmp(body, "new", 3) == 0);
     close(fd);

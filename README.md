@@ -31,6 +31,9 @@ and local state. Create the download directories before starting the clients.
 The client defaults to the local server, peer port `9001`, ID file
 `config.txt`, catalog `index.txt`, and download directory `.`. Use
 `--server IPv4` and `--port PORT` to choose the control endpoint.
+The client generates a random 32-bit ID on first run and sends it with its
+listening port when it connects. Login activates that announcement and
+publishes saved shares.
 
 For a LAN check with two workstations, replace `192.168.1.20` with the server's
 LAN IPv4 address. Run the first command on the server and one client command on
@@ -43,31 +46,34 @@ server port and the peer listener ports.
 ./client --server 192.168.1.20 --port 9000 --peer-port 9002
 ```
 
-| Command | Action |
+| Terminal command | Action |
 | --- | --- |
 | `register USER` | Create an account |
-| `login USER` | Log in and announce the peer listener |
-| `hello` | Retry the peer announcement and reannounce shares |
-| `logout` | End the session and release the client ID |
-| `share PATH` | Save a local file to the catalog and advertise it when online |
+| `login USER` | Log in and publish saved shares |
+| `hello` | Refresh the peer announcement and retry saved shares |
+| `logout` | Log out and release the client ID |
+| `share PATH` | Save a local file and advertise it when logged in |
 | `unshare NAME` | Remove an advertisement and its local catalog entry |
 | `shares` | List local files as pending or announced |
 | `search NAME` | Find peers that share the exact filename |
-| `download NUMBER` | Download a numbered result from the latest search |
+| `download NUMBER` | Download a result from the latest search |
 | `help` | Show commands |
 | `quit` | Close the connection and exit |
 
 The terminal hides passwords. With redirected input, put the password on the
 line after the account command. File arguments use the literal remainder of
-the line, so spaces work without quotes. Shared filenames are printable ASCII
-basenames. Each numbered search result shows the filename, client ID, IP
+the line, so spaces work without quotes. Filenames may contain non-ASCII
+characters. Each numbered search result shows the filename, client ID, IP
 address, and port. Use the result number with `download NUMBER`. The client
-prints `200 END` when the search is complete.
+prints `200 OK` when the search is complete. Terminal commands use lowercase.
+`help` and `quit` are local to the client. Both executables support `--help`.
 
-Local shares survive logout and restart. A failed download is displayed locally
-and its temporary file is removed. A completed download cannot overwrite an
-existing path. Ctrl+C or SIGTERM stops a pending download, restores terminal
-echo, and joins the client workers.
+Local shares survive logout and restart. The client prints download failures
+and removes partial files. When an upload request reveals a missing or
+inaccessible source, the owner withdraws that listing with
+`UNSHARE` and keeps its local catalog entry pending. A completed download
+cannot overwrite an existing path. Ctrl+C or SIGTERM stops a pending
+download, restores terminal echo, and joins the client workers.
 
 `unshare` saves the local removal before requesting removal on the server. If
 the save fails, the file stays shared. After a successful save, the client
@@ -77,40 +83,33 @@ of the same name replaces the old advertisement and cancels its queued removal.
 
 ## Protocol and storage
 
-Both control and peer headers use CRLF and three-digit replies. The tracker
-sends one `FILE` line per search match with the size recorded at announcement,
-followed by `200 END`. Peers read up to the source's EOF and send the bytes in
-length-prefixed `<data>` frames and a final `<end>` frame. The downloader
-publishes the bytes it received once the final frame is complete. Both peers
-need the updated client for this transfer format.
-See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the full contract.
+Both channels use CRLF and case-insensitive command verbs. Replies begin with
+a three-digit numeric code. Search sends one `200-` continuation with the
+filename, size, client ID, address, and port per result, then ends with
+`200 OK`. Peer downloads start with `200 CHUNKED`. The uploader reads the file
+through EOF and sends length-prefixed `<data>` frames and a final `<end>`
+frame. The downloader publishes the file after receiving the final frame.
+Upgrade the server and all clients together when switching wire formats.
+The full contract is in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 Account storage uses salted PBKDF2-HMAC-SHA256, private permissions, an
 exclusive lock, and a durable append before registration succeeds. Existing
 account records and local catalogs retain their format. The server logs
-connection activity and successful account, announcement, and file operations.
-The peer registry and file index live in memory. The server copies search
-matches under a mutex and sends them after releasing the lock.
+connection activity and request outcomes. The peer registry and file index
+live in memory. The server copies search matches under a mutex and sends
+them after releasing the lock.
 
 Use this IPv4 service on a controlled network. Credentials travel in plaintext.
 Socket timeouts bound inactivity, and available memory and OS resources govern
 how many independent sessions, entries, and bytes can be handled.
 
-## Coursework references
-
-HW1 supplied the dynamic input, account/session separation, and logging
-patterns. HW2 and HW3 reinforced validating addresses, ports, and input before
-acting, and checking socket results. HW4 demonstrated buffered line and binary
-reads through one TCP reader. HW5–HW7 reinforced CRLF framing, numeric
-responses, connection-scoped state, and cleanup, with pthreads in HW6 and
-poll-based socket and terminal handling in HW7.
-
 ## Verification
 
 `make test` runs C socket, protocol, and file tests alongside Python TCP
 integration tests. The cases include fragmented CRLF, pipelined requests, long
-input, empty and interrupted searches, concurrent sessions and index updates,
-restart and storage failure, exact binary transfers, and signal cleanup.
+input, mixed-case verbs, malformed replies, empty and interrupted multiline
+searches, concurrent sessions and index updates, restart and storage failure,
+exact binary transfers, stale advertisement withdrawal, and signal cleanup.
 
 An AddressSanitizer and UndefinedBehaviorSanitizer build uses the same suite.
 
