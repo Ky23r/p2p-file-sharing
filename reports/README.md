@@ -61,12 +61,16 @@ Trong tên tệp, các chữ cái và chữ số ASCII cùng các ký tự `-`, 
 
 Một ID đang hoạt động thuộc về một kết nối điều khiển. Cùng một tài khoản có thể có nhiều phiên với các ID khác nhau. Khi cùng phiên gửi lại `HELLO` với ID cũ và cổng mới, máy chủ giữ quảng bá và cập nhật cổng trả về trong kết quả tìm kiếm. Khi đổi sang ID mới thành công, máy chủ xóa quảng bá của ID cũ. Một lần `HELLO` bị từ chối giữ nguyên đăng ký trước đó.
 
-### 3.2. Phản hồi lỗi
+### 3.2. Mã phản hồi thành công và lỗi
 
-Máy chủ kiểm tra cú pháp và giá trị trước khi kiểm tra trạng thái phiên. Một lệnh có quá hai đối số nhận `400`. Phản hồi lỗi điều khiển gồm một dòng chứa mã và CRLF.
+Mỗi dòng phản hồi dưới đây kết thúc bằng CRLF trên đường truyền. Phản hồi lỗi điều khiển chỉ gồm mã ba chữ số và CRLF. Máy chủ kiểm tra cú pháp và giá trị trước khi kiểm tra trạng thái phiên. Một lệnh có quá hai đối số nhận `400`.
 
-| Mã | Tình huống |
+| Dòng phản hồi | Ý nghĩa |
 | --- | --- |
+| `200` | Hoàn tất `LOGIN`, `HELLO`, `SHARE`, `UNSHARE` hoặc `LOGOUT` trên kênh điều khiển. |
+| `201` | `REGISTER` đã tạo tài khoản. Kết nối tiếp tục ở trạng thái chưa đăng nhập. |
+| `200 END` | Kết thúc phản hồi `SEARCH` thành công, kể cả khi có 0 dòng `FILE`. |
+| `200 CHUNKED` | Peer chấp nhận `GET` và bắt đầu gửi dữ liệu theo khung. Lượt tải hoàn tất khi bên nhận đọc đủ khung `<end>`. |
 | `400` | Định dạng dòng, cú pháp, số lượng đối số hoặc giá trị không hợp lệ. |
 | `401` | Cần đăng nhập hoặc thông tin đăng nhập sai. Tài khoản không tồn tại và mật khẩu sai nhận cùng mã. |
 | `403` | Phiên cần `HELLO` thành công trước khi dùng lệnh quản lý tệp. |
