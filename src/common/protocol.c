@@ -17,7 +17,7 @@ const char *protocol_command(const char *line, size_t length)
 {
     static const char *const commands[] = {
         CMD_REGISTER, CMD_LOGIN, CMD_HELLO, CMD_LOGOUT, CMD_SHARE,
-        CMD_UNSHARE, CMD_SEARCH, CMD_GET
+        CMD_UNSHARE, CMD_SEARCH, CMD_FAIL, CMD_GET
     };
     if (!printable_ascii(line, length))
         return NULL;
@@ -62,23 +62,12 @@ size_t protocol_tokens(char *line, size_t length, char **tokens, size_t capacity
     return count;
 }
 
-static bool final_reply(const char *line, size_t length)
+int protocol_status(const char *line, size_t length)
 {
-    return length >= 5 && line[0] >= '1' && line[0] <= '5' &&
-           line[1] >= '0' && line[1] <= '9' &&
-           line[2] >= '0' && line[2] <= '9' &&
-           line[3] == ' ' && line[4] != ' ' && line[length - 1] != ' ' &&
-           printable_ascii(line + 4, length - 4);
-}
-
-bool protocol_reply_is(const char *line, size_t length, const char *code)
-{
-    return final_reply(line, length) && memcmp(line, code, 3) == 0;
-}
-
-bool protocol_error(const char *line, size_t length)
-{
-    return final_reply(line, length) && (line[0] == '4' || line[0] == '5');
+    if (length != 3 || line[0] < '1' || line[0] > '5' ||
+        line[1] < '0' || line[1] > '9' || line[2] < '0' || line[2] > '9')
+        return 0;
+    return (line[0] - '0') * 100 + (line[1] - '0') * 10 + (line[2] - '0');
 }
 
 bool protocol_valid_username(const char *username)

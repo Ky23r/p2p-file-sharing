@@ -14,7 +14,7 @@ typedef struct session {
     int fd;
     bool authenticated;
     uint32_t client_id;
-    uint16_t port;  /* A nonzero port stages HELLO. Login makes it active. */
+    uint16_t port;  /* HELLO is retained for this connection. Login makes it active. */
     char ip[INET_ADDRSTRLEN];
     shared_file *files;
     pthread_t thread;
@@ -31,7 +31,6 @@ typedef struct {
 } session_manager;
 
 typedef struct {
-    uint64_t size;
     uint32_t client_id;
     char ip[INET_ADDRSTRLEN];
     uint16_t port;
@@ -39,7 +38,7 @@ typedef struct {
 
 enum session_result {
     SESSION_OK, SESSION_UNAUTHORIZED, SESSION_ID_IN_USE, SESSION_HELLO_REQUIRED,
-    SESSION_WRONG_CLIENT, SESSION_FILE_NOT_FOUND, SESSION_ERROR
+    SESSION_WRONG_CLIENT, SESSION_ERROR
 };
 int session_manager_init(session_manager *manager);
 void session_manager_destroy(session_manager *manager);
@@ -64,10 +63,13 @@ enum session_result session_hello(session_manager *manager, session *client,
  * logout and disconnect. No socket/log I/O occurs under that mutex.
  */
 enum session_result session_share(session_manager *manager, session *client,
-                                  uint32_t id, const char *filename, uint64_t size);
+                                  uint32_t id, const char *filename);
 enum session_result session_unshare(session_manager *manager, session *client,
                                     const char *filename);
-/* Caller frees the snapshot. Zero results sets matches=NULL and count=0.
+/* Stale reports can only withdraw a share from the reporting session. */
+enum session_result session_download_failure(session_manager *manager, session *client,
+                                              uint32_t id, const char *filename, bool stale);
+/* Excludes the requester. Caller frees the snapshot. Zero results sets matches=NULL and count=0.
  * Snapshot records remain valid after their owning sessions disconnect.
  */
 enum session_result session_search(session_manager *manager, session *client,

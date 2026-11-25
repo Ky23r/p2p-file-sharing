@@ -79,11 +79,11 @@ static enum download_result receive_payload(net_reader *reader, int output, size
     return DOWNLOAD_OK;
 }
 
-enum download_result download_file(const FileSearchResult *result, const char *directory,
+enum download_result download_file(const FileSearchResult *result, const char *name, const char *directory,
                                    ClientSignals *signals)
 {
     char token[FILE_NAME_TOKEN_CAP];
-    if (!protocol_encode_filename(result->name, token, sizeof(token))) {
+    if (!protocol_encode_filename(name, token, sizeof(token))) {
         errno = EINVAL;
         return DOWNLOAD_LOCAL_ERROR;
     }
@@ -96,7 +96,7 @@ enum download_result download_file(const FileSearchResult *result, const char *d
     size_t capacity = 0;
     char temporary[DOWNLOAD_TEMP_NAME_CAP] = "";
     struct stat existing;
-    if (fstatat(folder, result->name, &existing, AT_SYMLINK_NOFOLLOW) == 0) {
+    if (fstatat(folder, name, &existing, AT_SYMLINK_NOFOLLOW) == 0) {
         errno = EEXIST;
         goto finish;
     }
@@ -127,22 +127,10 @@ enum download_result download_file(const FileSearchResult *result, const char *d
         result_code = receive_line_failure(status);
         goto finish;
     }
-    if (protocol_error(header, header_length)) {
-        errno = EPROTO;
-        if (strcmp(header, REPLY_FILE_UNAVAILABLE) == 0 || strcmp(header, REPLY_FILE_NOT_SHARED) == 0) {
-            result_code = DOWNLOAD_NOT_FOUND;
-            errno = ENOENT;
-        } else if (strcmp(header, REPLY_FILE_SIZE_CHANGED) == 0) {
-            result_code = DOWNLOAD_SIZE_MISMATCH;
-        } else {
-            result_code = DOWNLOAD_TRANSFER_FAILED;
-        }
-        goto finish;
-    }
-    if (protocol_tokens(header, header_length, tokens, 2) != 2 || strcmp(tokens[0], STATUS_OK) != 0 ||
-        strcmp(tokens[1], FILE_TRANSFER_MODE) != 0) {
-        result_code = DOWNLOAD_TRANSFER_FAILED;
-        errno = EPROTO;
+    int code = protocol_status(header, header_length);
+    if (code != STATUS_OK) {
+        result_code = code == STATUS_NOT_FOUND ? DOWNLOAD_NOT_FOUND : DOWNLOAD_TRANSFER_FAILED;
+        errno = code == STATUS_NOT_FOUND ? ENOENT : code == STATUS_UNAVAILABLE ? EAGAIN : EPROTO;
         goto finish;
     }
     for (;;) {
@@ -177,7 +165,7 @@ enum download_result download_file(const FileSearchResult *result, const char *d
         goto finish;
     int closed = close(output);
     output = -1;
-    if (closed != 0 || linkat(folder, temporary, folder, result->name, 0) != 0)
+    if (closed != 0 || linkat(folder, temporary, folder, name, 0) != 0)
         goto finish;
     result_code = DOWNLOAD_OK;
 finish:;

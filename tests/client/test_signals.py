@@ -67,8 +67,7 @@ class InteractiveClient:
         self.send("login alice")
         self.expect(b"Password: ")
         self.send("LocalTest!42")
-        self.expect(b"200 OK\r\n")
-        self.expect(b"200 HELLO\r\n")
+        self.expect(b"Logged in\r\n")
         self.expect(b"p2p> ")
 
     def close(self):
@@ -116,7 +115,7 @@ class StalledPeer:
                         raise AssertionError("Client closed without a complete GET request")
                     request.extend(block)
                 self.request = bytes(request)
-                connection.sendall(b"200 CHUNKED\r\n<data> 3\r\nabc<end> 7\r\n")
+                connection.sendall(b"200\r\n<data> 3\r\nabc<end> 7\r\n")
                 self.sent.set()
                 self.stop.wait()
         except Exception as error:
@@ -165,9 +164,9 @@ class ClientSignalTests(unittest.TestCase):
         self.addCleanup(peer.close)
         filename = "cancelled.bin"
         self.server.search_response = (
-            f"200-{filename} 10 90 127.0.0.1 {peer.port}\r\n200 OK\r\n".encode())
+            f"200 1\r\n90 127.0.0.1 {peer.port}\r\n".encode())
         client.send("search " + filename)
-        client.expect(b"200 OK\r\n")
+        client.expect(b"Found 1\r\n")
         client.expect(b"p2p> ")
         client.send("download 1")
         self.assertTrue(peer.sent.wait(timeout=3), f"Peer never sent a partial body: {peer.error!r}")

@@ -40,15 +40,15 @@ int main(void)
     SharedIndex *index = shared_index_load(catalog);
     assert(index != NULL);
     assert(shared_index_load(catalog) == NULL); /* One writer per catalog. */
-    assert(shared_index_add(index, source, decoded) == 0);
-    assert(strcmp(decoded, name) == 0);
-    assert(shared_index_add(index, source, decoded) == 0); /* Idempotent local add. */
     SharedFile entry;
+    assert(shared_index_add(index, source, &entry) == 0);
+    assert(strcmp(entry.name, name) == 0);
+    assert(shared_index_add(index, source, &entry) == 0); /* Idempotent local add. */
     assert(shared_index_get(index, 0, &entry));
-    assert(entry.size == 4 && !entry.announced);
+    assert(!entry.announced);
     assert(shared_index_open(index, name) < 0);
     shared_index_set_online(index, true);
-    shared_index_mark(index, name, true, 4);
+    shared_index_mark(index, name, true);
     fd = shared_index_open(index, name);
     assert(fd >= 0);
     close(fd);
@@ -69,7 +69,7 @@ int main(void)
     size_t response_capacity = 0;
     size_t header_length;
     assert(recv_line(&reader, &response, &response_capacity, &header_length) == NET_LINE_OK);
-    assert(strcmp(response, "200 CHUNKED") == 0);
+    assert(strcmp(response, "200") == 0);
     assert(recv_line(&reader, &response, &response_capacity, &header_length) == NET_LINE_OK);
     assert(strcmp(response, "<end> 4") == 0);
     free(response);
@@ -88,19 +88,18 @@ int main(void)
     assert(mkdir(downloads, 0700) == 0);
     FileSearchResult result = {.client_id = 7, .ip = "127.0.0.1",
                                .port = ntohs(address.sin_port)};
-    strcpy(result.name, name);
-    assert(download_file(&result, downloads, NULL) == DOWNLOAD_OK);
+    assert(download_file(&result, name, downloads, NULL) == DOWNLOAD_OK);
     struct stat downloaded;
     assert(stat(destination, &downloaded) == 0 && (downloaded.st_mode & 0777) == 0600);
     fd = open(destination, O_RDONLY);
     assert(fd >= 0 && read(fd, body, sizeof(body)) == 4 && memcmp(body, "x\0\ny", 4) == 0);
     close(fd);
-    assert(download_file(&result, downloads, NULL) == DOWNLOAD_LOCAL_ERROR && errno == EEXIST);
+    assert(download_file(&result, name, downloads, NULL) == DOWNLOAD_LOCAL_ERROR && errno == EEXIST);
     assert(unlink(destination) == 0);
     fd = open(source, O_WRONLY | O_TRUNC);
     assert(fd >= 0 && write(fd, "new", 3) == 3);
     close(fd);
-    assert(download_file(&result, downloads, NULL) == DOWNLOAD_OK);
+    assert(download_file(&result, name, downloads, NULL) == DOWNLOAD_OK);
     fd = open(destination, O_RDONLY);
     assert(fd >= 0 && read(fd, body, sizeof(body)) == 3 && memcmp(body, "new", 3) == 0);
     close(fd);

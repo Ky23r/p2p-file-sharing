@@ -12,19 +12,14 @@ static void test_commands_and_replies(void)
     assert(protocol_command(invalid, sizeof(invalid) - 1) == NULL);
     assert(protocol_command("SEARCHING", sizeof("SEARCHING") - 1) == NULL);
 
-    const char completion[] = "200 Search complete";
-    assert(protocol_reply_is(completion, sizeof(completion) - 1, STATUS_OK));
-    assert(!protocol_reply_is("200-More", sizeof("200-More") - 1, STATUS_OK));
-    const char *errors[] = {REPLY_SERVICE_UNAVAILABLE, REPLY_INVALID_COMMAND,
-                            REPLY_BAD_SEQUENCE, REPLY_FILE_SIZE_CHANGED, "499 Other error"};
-    for (size_t i = 0; i < sizeof(errors) / sizeof(errors[0]); ++i)
-        assert(protocol_error(errors[i], strlen(errors[i])));
-    const char *malformed[] = {REPLY_OK, "530", "530 ", "530  Invalid", "530 Invalid ",
-                               "530-Invalid", "53 Invalid", "530\tInvalid", "530 Inva\rlid"};
+    assert(protocol_status("200", 3) == STATUS_OK);
+    assert(protocol_status("400", 3) == STATUS_BAD_REQUEST);
+    assert(protocol_status("503", 3) == STATUS_UNAVAILABLE);
+    const char *malformed[] = {"", "20", "200 ", "200 2", "530-Invalid",
+                               "53x", "530\tInvalid", "600", "099"};
     for (size_t i = 0; i < sizeof(malformed) / sizeof(malformed[0]); ++i)
-        assert(!protocol_error(malformed[i], strlen(malformed[i])));
-    const char embedded_nul[] = "530 Invalid\0credentials";
-    assert(!protocol_error(embedded_nul, sizeof(embedded_nul) - 1));
+        assert(protocol_status(malformed[i], strlen(malformed[i])) == 0);
+    assert(protocol_status("20\0", 3) == 0);
 }
 
 static void test_numbers(void)

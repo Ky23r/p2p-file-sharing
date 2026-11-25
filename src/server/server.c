@@ -59,7 +59,7 @@ static void usage(FILE *stream, const char *program)
             "       %s --help\n"
             "Defaults: %s:%u, accounts: %s\n"
             "Default log: <accounts-path>.log\n"
-            "Socket inactivity timeout: %d seconds.\n"
+            "Active socket I/O timeout: %d seconds. Idle connections use TCP keepalive.\n"
             "SIGINT/SIGTERM gracefully stop the server.\n"
             "Plaintext authentication is for controlled local testing only.\n",
             program, program, DEFAULT_SERVER_IP, DEFAULT_SERVER_PORT,
@@ -75,48 +75,44 @@ static bool decimal(const char *text, uint32_t maximum, uint32_t *value)
     return true;
 }
 
-static const char *auth_response(enum auth_result result)
+static int auth_response(enum auth_result result)
 {
     switch (result) {
-    case AUTH_OK: return REPLY_OK CRLF;
-    case AUTH_INVALID: return REPLY_INVALID_ARGUMENTS CRLF;
-    case AUTH_USER_EXISTS: return REPLY_ACCOUNT_EXISTS CRLF;
-    case AUTH_BAD_CREDENTIALS: return REPLY_BAD_CREDENTIALS CRLF;
-    case AUTH_ERROR: return REPLY_PROCESSING_ERROR CRLF;
+    case AUTH_OK: return STATUS_OK;
+    case AUTH_INVALID: return STATUS_BAD_REQUEST;
+    case AUTH_USER_EXISTS: return STATUS_CONFLICT;
+    case AUTH_BAD_CREDENTIALS: return STATUS_UNAUTHORIZED;
+    case AUTH_ERROR: return STATUS_INTERNAL_ERROR;
     }
-    return REPLY_PROCESSING_ERROR CRLF;
+    return STATUS_INTERNAL_ERROR;
 }
 
-static const char *session_response(enum session_result result)
+static int session_response(enum session_result result)
 {
     switch (result) {
-    case SESSION_OK: return REPLY_OK CRLF;
-    case SESSION_UNAUTHORIZED: return REPLY_LOGIN_REQUIRED CRLF;
-    case SESSION_ID_IN_USE: return REPLY_CLIENT_ID_IN_USE CRLF;
-    case SESSION_WRONG_CLIENT: return REPLY_CLIENT_ID_MISMATCH CRLF;
-    case SESSION_HELLO_REQUIRED: return REPLY_BAD_SEQUENCE CRLF;
-    case SESSION_FILE_NOT_FOUND: return REPLY_FILE_NOT_SHARED CRLF;
-    default: return REPLY_PROCESSING_ERROR CRLF;
+    case SESSION_OK: return STATUS_OK;
+    case SESSION_UNAUTHORIZED: return STATUS_UNAUTHORIZED;
+    case SESSION_ID_IN_USE: return STATUS_CONFLICT;
+    case SESSION_WRONG_CLIENT:
+    case SESSION_HELLO_REQUIRED: return STATUS_FORBIDDEN;
+    default: return STATUS_INTERNAL_ERROR;
     }
 }
 
-/* A successful SEARCH supplies its filename token and a snapshot to send. */
-static const char *dispatch(server_state *server, session *client, const char *command,
-                            char *line, size_t length,
-                            file_match **matches, size_t *match_count,
-                            const char **search_name, const char **username,
-                            char *detail, size_t detail_capacity)
+static int dispatch(server_state *server, session *client, const char *command,
+                    char *line, size_t length, file_match **matches, size_t *match_count,
+                    const char **username, char *detail, size_t detail_capacity)
 {
     char *args[4];
     size_t count = protocol_tokens(line, length, args, sizeof(args) / sizeof(args[0]));
     if (count == 0)
-        return REPLY_INVALID_ARGUMENTS CRLF;
+        return STATUS_BAD_REQUEST;
 
     if (strcmp(command, CMD_REGISTER) == 0 || strcmp(command, CMD_LOGIN) == 0) {
         if (count != 3 || !protocol_valid_username(args[1]) || !protocol_valid_password(args[2]))
-            return REPLY_INVALID_ARGUMENTS CRLF;
+            return STATUS_BAD_REQUEST;
         if (session_authenticated(&server->sessions, client))
-            return REPLY_BAD_SEQUENCE CRLF;
+            return STATUS_CONFLICT;
         bool registering = strcmp(command, CMD_REGISTER) == 0;
         enum auth_result result = registering ? auth_register(&server->auth, args[1], args[2]) :
                                                auth_login(&server->auth, args[1], args[2]);
@@ -134,7 +130,7 @@ static const char *dispatch(server_state *server, session *client, const char *c
         uint32_t id, port;
         if (count != 3 || !decimal(args[1], UINT32_MAX, &id) ||
             !decimal(args[2], UINT16_MAX, &port) || port == 0)
-            return REPLY_INVALID_ARGUMENTS CRLF;
+            return STATUS_BAD_REQUEST;
         enum session_result result = session_hello(&server->sessions, client, id, (uint16_t)port);
         if (result == SESSION_OK)
             snprintf(detail, detail_capacity, "client_id=%" PRIu32 " port=%u", id, (unsigned)port);
@@ -142,38 +138,46 @@ static const char *dispatch(server_state *server, session *client, const char *c
     }
     if (strcmp(command, CMD_LOGOUT) == 0) {
         if (count != 1)
-            return REPLY_INVALID_ARGUMENTS CRLF;
-        return session_logout(&server->sessions, client) ? REPLY_OK CRLF : REPLY_LOGIN_REQUIRED CRLF;
+            return STATUS_BAD_REQUEST;
+        return session_logout(&server->sessions, client) ? STATUS_OK : STATUS_UNAUTHORIZED;
     }
     char decoded[PROTOCOL_FILENAME_MAX + 1];
     if (strcmp(command, CMD_SHARE) == 0) {
         uint32_t id;
-        uint64_t size;
-        if (count != 4 || !decimal(args[1], UINT32_MAX, &id) ||
-            !protocol_decode_filename(args[2], decoded, sizeof(decoded)) ||
-            !protocol_parse_uint64(args[3], UINT64_MAX, &size))
-            return REPLY_INVALID_ARGUMENTS CRLF;
-        enum session_result result = session_share(&server->sessions, client, id, args[2], size);
+        if (count != 3 || !decimal(args[1], UINT32_MAX, &id) ||
+            !protocol_decode_filename(args[2], decoded, sizeof(decoded)))
+            return STATUS_BAD_REQUEST;
+        enum session_result result = session_share(&server->sessions, client, id, args[2]);
         if (result == SESSION_OK)
-            snprintf(detail, detail_capacity, "client_id=%" PRIu32 " filename=%s size=%" PRIu64,
-                     id, args[2], size);
+            snprintf(detail, detail_capacity, "client_id=%" PRIu32 " filename=%s", id, args[2]);
+        return session_response(result);
+    }
+    if (strcmp(command, CMD_FAIL) == 0) {
+        uint32_t id;
+        if (count != 4 || !decimal(args[1], UINT32_MAX, &id) ||
+            !protocol_decode_filename(args[2], decoded, sizeof(decoded)))
+            return STATUS_BAD_REQUEST;
+        int code = protocol_status(args[3], strlen(args[3]));
+        if (code != STATUS_NOT_FOUND && code != STATUS_UNAVAILABLE)
+            return STATUS_BAD_REQUEST;
+        enum session_result result = session_download_failure(&server->sessions, client, id, args[2],
+                                                              code == STATUS_NOT_FOUND);
+        if (result == SESSION_OK)
+            snprintf(detail, detail_capacity, "client_id=%" PRIu32 " filename=%s code=%s", id, args[2], args[3]);
         return session_response(result);
     }
     if (strcmp(command, CMD_UNSHARE) == 0 || strcmp(command, CMD_SEARCH) == 0) {
         if (count != 2 || !protocol_decode_filename(args[1], decoded, sizeof(decoded)))
-            return REPLY_INVALID_ARGUMENTS CRLF;
+            return STATUS_BAD_REQUEST;
         bool searching = strcmp(command, CMD_SEARCH) == 0;
         enum session_result result = searching ?
             session_search(&server->sessions, client, args[1], matches, match_count) :
             session_unshare(&server->sessions, client, args[1]);
-        if (result == SESSION_OK) {
-            if (searching)
-                *search_name = args[1];
+        if (result == SESSION_OK)
             snprintf(detail, detail_capacity, "filename=%s", args[1]);
-        }
         return session_response(result);
     }
-    return REPLY_INVALID_COMMAND CRLF;
+    return STATUS_BAD_REQUEST;
 }
 
 static void *client_worker(void *argument)
@@ -186,39 +190,58 @@ static void *client_worker(void *argument)
     int fd = args.client->fd;
     net_reader_init(&reader, fd);
     service_log_write(&args.server->log, "CONNECT fd=%d ip=%s", fd, args.client->ip);
+    struct pollfd incoming = {fd, POLLIN, 0};
     for (;;) {
-        int result = recv_line(&reader, &line, &capacity, &length);
+        /* Wait for the first byte without the receive timeout. Once a request
+         * starts, recv_line bounds waits for the rest of it. */
+        if (reader.next == reader.used) {
+            int ready;
+            do {
+                ready = poll(&incoming, 1, -1);
+            } while (ready < 0 && errno == EINTR);
+            if (ready < 0)
+                break;
+        }
+        int result = recv_line_bounded(&reader, &line, &capacity, &length, CONTROL_LINE_MAX);
+        if (result == NET_LINE_TOO_LONG) {
+            (void)send_status(fd, STATUS_BAD_REQUEST);
+            break;
+        }
         if (result != NET_LINE_OK && result != NET_LINE_INVALID)
             break;
 
         const char *command = result == NET_LINE_OK ? protocol_command(line, length) : NULL;
-        const char *username = NULL, *search_name = NULL;
-        const char *response = REPLY_INVALID_COMMAND CRLF;
+        const char *username = NULL;
+        int status = STATUS_BAD_REQUEST;
         file_match *matches = NULL;
         size_t match_count = 0;
         char detail[PROTOCOL_FILENAME_TOKEN_MAX + 64] = "";
         if (command != NULL && strcmp(command, CMD_GET) != 0) {
-            response = dispatch(args.server, args.client, command, line, length, &matches, &match_count,
-                                &search_name, &username, detail, sizeof(detail));
+            status = dispatch(args.server, args.client, command, line, length, &matches, &match_count,
+                              &username, detail, sizeof(detail));
         }
-        service_log_write(&args.server->log, "REQUEST fd=%d ip=%s command=%s result=%.3s%s%s%s%s",
-                          fd, args.client->ip, command != NULL ? command : "UNKNOWN", response,
+        service_log_write(&args.server->log, "REQUEST fd=%d ip=%s command=%s result=%d%s%s%s%s",
+                          fd, args.client->ip, command != NULL ? command : "UNKNOWN", status,
                           username != NULL ? " username=" : "", username != NULL ? username : "",
                           *detail != '\0' ? " " : "", detail);
 
-        bool sent = true;
-        for (size_t i = 0; sent && i < match_count; ++i) {
-            char record[PROTOCOL_FILENAME_TOKEN_MAX + 64];
-            int size = snprintf(record, sizeof(record),
-                                REPLY_CONTINUATION "%s %" PRIu64 " %" PRIu32 " %s %u" CRLF,
-                                search_name, matches[i].size, matches[i].client_id,
-                                matches[i].ip, (unsigned)matches[i].port);
-            sent = size > 0 && (size_t)size < sizeof(record) &&
-                   send_all(fd, record, (size_t)size) >= 0;
+        OPENSSL_cleanse(line, capacity);
+        OPENSSL_cleanse(reader.buffer, reader.next);
+        bool sent;
+        if (status == STATUS_OK && strcmp(command, CMD_SEARCH) == 0) {
+            char record[64];
+            int length = snprintf(record, sizeof(record), "%d %zu" CRLF, status, match_count);
+            sent = send_all(fd, record, (size_t)length) >= 0;
+            for (size_t i = 0; sent && i < match_count; ++i) {
+                length = snprintf(record, sizeof(record), "%" PRIu32 " %s %u" CRLF,
+                                  matches[i].client_id, matches[i].ip, (unsigned)matches[i].port);
+                sent = send_all(fd, record, (size_t)length) >= 0;
+            }
+        } else {
+            sent = send_status(fd, status) == 0;
         }
         free(matches);
-        OPENSSL_cleanse(line, capacity);
-        if (!sent || send_all(fd, response, strlen(response)) < 0)
+        if (!sent)
             break;
     }
     if (line != NULL) {
@@ -293,6 +316,7 @@ static void accept_client(int listener, server_state *server)
     struct timeval timeout = {SOCKET_TIMEOUT_SECONDS, 0};
     char ip[INET_ADDRSTRLEN];
     if (fd_flags(fd, false) != 0 ||
+        net_enable_keepalive(fd) != 0 ||
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0 ||
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) != 0 ||
         inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip)) == NULL) {
@@ -301,15 +325,13 @@ static void accept_client(int listener, server_state *server)
     }
     session *client = session_add(&server->sessions, fd, ip);
     if (client == NULL) {
-        static const char response[] = REPLY_SERVICE_UNAVAILABLE CRLF;
-        (void)send_all(fd, response, sizeof(response) - 1);
+        (void)send_status(fd, STATUS_UNAVAILABLE);
         close(fd);
         return;
     }
     worker_args *args = malloc(sizeof(*args));
     if (args == NULL) {
-        static const char response[] = REPLY_SERVICE_UNAVAILABLE CRLF;
-        (void)send_all(fd, response, sizeof(response) - 1);
+        (void)send_status(fd, STATUS_UNAVAILABLE);
         session_remove(&server->sessions, client);
         return;
     }
@@ -329,8 +351,7 @@ static void accept_client(int listener, server_state *server)
     }
     if (error != 0) {
         free(args);
-        static const char response[] = REPLY_SERVICE_UNAVAILABLE CRLF;
-        (void)send_all(fd, response, sizeof(response) - 1);
+        (void)send_status(fd, STATUS_UNAVAILABLE);
         session_remove(&server->sessions, client);
     }
 }

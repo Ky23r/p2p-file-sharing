@@ -46,18 +46,15 @@ static size_t find_entry(SharedIndex *index, const char *name)
     return i;
 }
 
-int shared_file_open(const char *path, uint64_t *size)
+int shared_file_open(const char *path)
 {
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0)
         return -1;
     struct stat info;
     int result = fstat(fd, &info);
-    if (result == 0 && S_ISREG(info.st_mode) && info.st_size >= 0) {
-        if (size != NULL)
-            *size = (uint64_t)info.st_size;
+    if (result == 0 && S_ISREG(info.st_mode))
         return fd;
-    }
     int error = result < 0 ? errno : EINVAL;
     close(fd);
     errno = error;
@@ -96,7 +93,7 @@ static int save_index(SharedIndex *index, size_t skip)
         if (error == 0 && rename(temporary, index->path) != 0)
             error = errno;
     }
-    if (fd >= 0)
+    if (fd >= 0 && error != 0)
         unlink(temporary);
     free(temporary);
     if (error != 0) {
@@ -122,23 +119,35 @@ static int read_index(SharedIndex *index)
     if (fd < 0)
         return errno == ENOENT ? 0 : -1;
     struct stat info;
-    if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_uid != geteuid() || info.st_nlink != 1) {
+    if (fstat(fd, &info) != 0) {
+        int error = errno;
+        close(fd);
+        errno = error;
+        return -1;
+    }
+    if (!S_ISREG(info.st_mode) || info.st_uid != geteuid() || info.st_nlink != 1) {
         close(fd);
         errno = EINVAL;
         return -1;
     }
     FILE *file = fdopen(fd, "r");
     if (file == NULL) {
+        int error = errno;
         close(fd);
+        errno = error;
         return -1;
     }
     char line[2 * (FILE_NAME_CAP + FILE_PATH_CAP) + 2];
-    int result = 0;
+    int error = 0;
     while (fgets(line, sizeof(line), file) != NULL) {
         size_t length = strlen(line);
         char *separator = strchr(line, '\t');
-        if (length == 0 || line[length - 1] != '\n' || separator == NULL || reserve_entry(index) != 0) {
-            result = -1;
+        if (length == 0 || line[length - 1] != '\n' || separator == NULL) {
+            error = EINVAL;
+            break;
+        }
+        if (reserve_entry(index) != 0) {
+            error = errno;
             break;
         }
         line[length - 1] = '\0';
@@ -148,21 +157,19 @@ static int read_index(SharedIndex *index)
         if (!file_name_decode(line, entry->name) ||
             !file_hex_decode(separator, entry->path, sizeof(entry->path)) || !valid_path(entry->path) ||
             strcmp(strrchr(entry->path, '/') + 1, entry->name) != 0 || find_entry(index, entry->name) != index->count) {
-            result = -1;
+            error = EINVAL;
             break;
         }
-        int source = shared_file_open(entry->path, &entry->size);
-        if (source >= 0)
-            close(source);
         index->count++;
     }
-    if (ferror(file))
-        result = -1;
-    if (fclose(file) != 0)
-        result = -1;
-    if (result != 0)
-        errno = EINVAL;
-    return result;
+    if (error == 0 && ferror(file))
+        error = errno == 0 ? EIO : errno;
+    if (fclose(file) != 0 && error == 0)
+        error = errno;
+    if (error == 0)
+        return 0;
+    errno = error;
+    return -1;
 }
 
 SharedIndex *shared_index_load(const char *path)
@@ -215,7 +222,7 @@ void shared_index_destroy(SharedIndex *index)
     free(index);
 }
 
-int shared_index_add(SharedIndex *index, const char *path, char name[FILE_NAME_CAP])
+int shared_index_add(SharedIndex *index, const char *path, SharedFile *entry)
 {
     char *canonical = realpath(path, NULL);
     if (canonical == NULL)
@@ -231,16 +238,14 @@ int shared_index_add(SharedIndex *index, const char *path, char name[FILE_NAME_C
         errno = EINVAL;
         return -1;
     }
-    uint64_t size;
-    int fd = shared_file_open(canonical, &size);
+    int fd = shared_file_open(canonical);
     if (fd < 0) {
         free(canonical);
         return -1;
     }
     close(fd);
-    strcpy(name, basename);
     pthread_mutex_lock(&index->mutex);
-    size_t position = find_entry(index, name);
+    size_t position = find_entry(index, basename);
     int result = 0;
     if (position != index->count) {
         if (strcmp(index->entries[position].path, canonical) != 0) {
@@ -250,16 +255,17 @@ int shared_index_add(SharedIndex *index, const char *path, char name[FILE_NAME_C
     } else if (reserve_entry(index) != 0) {
         result = -1;
     } else {
-        SharedFile *entry = &index->entries[index->count++];
-        strcpy(entry->name, name);
-        strcpy(entry->path, canonical);
-        entry->size = size;
-        entry->announced = false;
+        SharedFile *added = &index->entries[index->count++];
+        *added = (SharedFile){0};
+        strcpy(added->name, basename);
+        strcpy(added->path, canonical);
         if (save_index(index, SIZE_MAX) != 0) {
             index->count--;
             result = -1;
         }
     }
+    if (result == 0)
+        *entry = index->entries[position];
     pthread_mutex_unlock(&index->mutex);
     free(canonical);
     return result;
@@ -302,15 +308,12 @@ void shared_index_set_online(SharedIndex *index, bool online)
     pthread_mutex_unlock(&index->mutex);
 }
 
-void shared_index_mark(SharedIndex *index, const char *name, bool announced, uint64_t size)
+void shared_index_mark(SharedIndex *index, const char *name, bool announced)
 {
     pthread_mutex_lock(&index->mutex);
     size_t position = find_entry(index, name);
-    if (position < index->count) {
+    if (position < index->count)
         index->entries[position].announced = announced;
-        if (announced)
-            index->entries[position].size = size;
-    }
     pthread_mutex_unlock(&index->mutex);
 }
 
@@ -321,7 +324,7 @@ int shared_index_open(SharedIndex *index, const char *name)
     int fd = -1;
     errno = ENODATA;
     if (index->online && position < index->count && index->entries[position].announced)
-        fd = shared_file_open(index->entries[position].path, NULL);
+        fd = shared_file_open(index->entries[position].path);
     pthread_mutex_unlock(&index->mutex);
     return fd;
 }

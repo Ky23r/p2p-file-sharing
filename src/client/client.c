@@ -49,7 +49,6 @@ static void commands(void)
 {
     puts("register USER    Create an account\n"
          "login USER       Log in and publish saved shares\n"
-         "hello            Refresh the peer announcement and retry saved shares\n"
          "logout           Log out and release the client ID\n"
          "share PATH       Save a local file and advertise it when logged in\n"
          "unshare NAME     Remove an advertisement and its local catalog entry\n"
@@ -298,8 +297,6 @@ static int run_client(ClientSession *server, uint32_t id, uint16_t peer_port, Cl
             result = client_download(server, argument);
         } else if (argument != NULL) {
             fputs("Unexpected argument. Type 'help' for commands.\n", stderr);
-        } else if (strcmp(line, "hello") == 0) {
-            result = client_hello(server);
         } else if (strcmp(line, "logout") == 0) {
             result = client_logout(server);
         } else if (strcmp(line, "shares") == 0) {
@@ -376,17 +373,17 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IOLBF, 0);
     /* Input polling must see every byte, including redirected multi-line input. */
     setvbuf(stdin, NULL, _IONBF, 0);
-    server = client_session_start(fd, id, options.peer_port, index, options.downloads, signals);
+    server = client_session_start(fd, id, index, options.downloads, signals);
     if (server == NULL) {
         perror("Starting control session");
         goto cleanup;
     }
-    peers = peer_server_start(peer_listener, index, client_withdraw_stale_share, server);
+    peers = peer_server_start(peer_listener, index, client_report_upload_failure, server);
     if (peers == NULL) {
         perror("Starting peer workers");
         goto cleanup;
     }
-    if (client_stage_hello(server) == REQUEST_OK)
+    if (client_stage_hello(server, options.peer_port) == REQUEST_OK)
         result = run_client(server, id, options.peer_port, signals);
 cleanup:
     client_session_interrupt(server);

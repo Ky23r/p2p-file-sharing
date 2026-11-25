@@ -16,7 +16,6 @@
 #define FILE_CHUNK_MAX 65536U
 /* Longest peer line is GET with a fully escaped basename. Count bytes before LF. */
 #define FILE_PEER_LINE_MAX (sizeof("GET " CRLF) - 2U + PROTOCOL_FILENAME_TOKEN_MAX)
-#define FILE_TRANSFER_MODE "CHUNKED"
 #define FILE_DATA_TAG "<data>"
 #define FILE_END_TAG "<end>"
 
@@ -24,7 +23,6 @@ typedef struct {
     uint32_t client_id;
     char ip[16];
     uint16_t port;
-    char name[FILE_NAME_CAP];
 } FileSearchResult;
 
 /* Parsing helpers borrow NUL-terminated strings and caller-provided buffers;

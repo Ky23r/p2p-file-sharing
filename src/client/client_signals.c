@@ -20,7 +20,7 @@ struct ClientSignals {
 };
 
 /* Workers inherit blocked signals. Only the main thread and its handler access
- * descriptor slots; the heartbeat also reads the lock-free signal number.
+ * descriptor slots. Workers can read the lock-free signal number.
  */
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "Signal notification needs lock-free atomic int");
 static atomic_int signal_number;

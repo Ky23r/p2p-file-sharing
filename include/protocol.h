@@ -3,24 +3,16 @@
 
 /* See docs/PROTOCOL.md for the shared control and peer protocols. */
 #define CRLF "\r\n"
-#define STATUS_OK "200"
-#define STATUS_SERVICE_UNAVAILABLE "421"
-#define REPLY_OK STATUS_OK " OK"
-#define REPLY_CONTINUATION STATUS_OK "-"
-#define REPLY_SERVICE_UNAVAILABLE STATUS_SERVICE_UNAVAILABLE " Service unavailable"
-#define REPLY_TEMPORARY_FILE_ERROR "450 File temporarily unavailable"
-#define REPLY_PROCESSING_ERROR "451 Local processing error"
-#define REPLY_INVALID_COMMAND "500 Invalid or unknown command"
-#define REPLY_INVALID_ARGUMENTS "501 Invalid arguments"
-#define REPLY_BAD_SEQUENCE "503 Bad command sequence"
-#define REPLY_LOGIN_REQUIRED "530 Not logged in"
-#define REPLY_BAD_CREDENTIALS "530 Invalid credentials"
-#define REPLY_ACCOUNT_EXISTS "550 Account already exists"
-#define REPLY_CLIENT_ID_IN_USE "550 Client ID in use"
-#define REPLY_CLIENT_ID_MISMATCH "550 Client ID does not match session"
-#define REPLY_FILE_NOT_SHARED "550 File not shared"
-#define REPLY_FILE_UNAVAILABLE "550 File unavailable"
-#define REPLY_FILE_SIZE_CHANGED "550 File size changed"
+enum protocol_status {
+    STATUS_OK = 200,
+    STATUS_BAD_REQUEST = 400,
+    STATUS_UNAUTHORIZED = 401,
+    STATUS_FORBIDDEN = 403,
+    STATUS_NOT_FOUND = 404,
+    STATUS_CONFLICT = 409,
+    STATUS_INTERNAL_ERROR = 500,
+    STATUS_UNAVAILABLE = 503
+};
 
 #define CMD_REGISTER "REGISTER"
 #define CMD_LOGIN "LOGIN"
@@ -29,9 +21,11 @@
 #define CMD_SHARE "SHARE"
 #define CMD_UNSHARE "UNSHARE"
 #define CMD_SEARCH "SEARCH"
+#define CMD_FAIL "FAIL"
 #define CMD_GET "GET"
 
 #define PASSWORD_MIN 8U
+#define CONTROL_LINE_MAX 65536U /* Bytes before LF, including CR. */
 #define PROTOCOL_FILENAME_MAX 255U
 #define PROTOCOL_FILENAME_TOKEN_MAX (PROTOCOL_FILENAME_MAX * 3U)
 #define DEFAULT_SERVER_IP "127.0.0.1"
@@ -45,10 +39,8 @@
 size_t protocol_tokens(char *line, size_t length, char **tokens, size_t capacity);
 /* Return a canonical verb for a printable request, regardless of verb case. */
 const char *protocol_command(const char *line, size_t length);
-/* Match a final reply by its three-digit code, independent of the reply text. */
-bool protocol_reply_is(const char *line, size_t length, const char *code);
-/* A single-line 4xx or 5xx reply with nonempty printable text. */
-bool protocol_error(const char *line, size_t length);
+/* Decode a bare three-digit status, or return zero on invalid syntax. */
+int protocol_status(const char *line, size_t length);
 bool protocol_valid_username(const char *username);
 bool protocol_valid_password(const char *password);
 

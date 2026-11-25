@@ -6,7 +6,6 @@
 typedef struct {
     char name[FILE_NAME_CAP];
     char path[FILE_PATH_CAP];
-    uint64_t size;
     bool announced;
 } SharedFile;
 
@@ -25,10 +24,10 @@ SharedIndex *shared_index_load(const char *path);
 /* Release the lock and state; NULL is safe. Does not delete persisted files. */
 void shared_index_destroy(SharedIndex *index);
 /* Open a canonical regular file with a wire-valid basename and atomically save it.
- * Returns 0 or -1/errno; name needs FILE_NAME_CAP bytes and is valid on success.
+ * Returns 0 and copies the entry on success, or -1/errno.
  * Same name/path is idempotent; a different path with that name gives EEXIST.
  */
-int shared_index_add(SharedIndex *index, const char *path, char name[FILE_NAME_CAP]);
+int shared_index_add(SharedIndex *index, const char *path, SharedFile *entry);
 /* Idempotent removal, 0 or -1/errno. On save failure keep the entry and its
  * announcement unchanged. A successful removal prevents new opens.
  */
@@ -37,14 +36,12 @@ int shared_index_remove(SharedIndex *index, const char *name);
 bool shared_index_get(SharedIndex *index, size_t position, SharedFile *entry);
 /* Going offline revokes all announcements. Going online alone activates none. */
 void shared_index_set_online(SharedIndex *index, bool online);
-/* Update a known entry's announcement. Size is used when announced is true.
- * Only set announced=true after the corresponding server acknowledgement.
+/* Update a known entry's announcement after the server acknowledges it. */
+void shared_index_mark(SharedIndex *index, const char *name, bool announced);
+/* Open a regular source without following its final symlink. Returns a
+ * caller-owned fd or -1/errno.
  */
-void shared_index_mark(SharedIndex *index, const char *name, bool announced, uint64_t size);
-/* Open a regular source without following its final symlink. Return caller-owned
- * fd or -1/errno. Optional size output is valid only on success.
- */
-int shared_file_open(const char *path, uint64_t *size);
+int shared_file_open(const char *path);
 /* Require online/announced state. Authorization and opening are atomic with
  * logout/unshare; fd remains usable afterward. Returns caller-owned fd or
  * -1/errno (ENODATA for an inactive share, or the source open error).

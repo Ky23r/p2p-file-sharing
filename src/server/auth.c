@@ -76,14 +76,18 @@ static int load_record(auth_store *store, char *line)
     char *fields[4] = {line, NULL, NULL, NULL};
     for (size_t i = 1; i < 4; ++i) {
         char *separator = strchr(fields[i - 1], ':');
-        if (separator == NULL)
+        if (separator == NULL) {
+            errno = EINVAL;
             return -1;
+        }
         *separator = '\0';
         fields[i] = separator + 1;
     }
     if (!protocol_valid_username(fields[0]) || strcmp(fields[1], "600000") != 0 ||
-        find_account(store, fields[0]) != NULL)
+        find_account(store, fields[0]) != NULL) {
+        errno = EINVAL;
         return -1;
+    }
     account *entry = malloc(sizeof(*entry) + strlen(fields[0]) + 1);
     if (entry == NULL)
         return -1;
@@ -91,6 +95,7 @@ static int load_record(auth_store *store, char *line)
         unhex(fields[3], entry->hash, HASH_SIZE) != 0) {
         OPENSSL_cleanse(entry, sizeof(*entry));
         free(entry);
+        errno = EINVAL;
         return -1;
     }
     strcpy(entry->username, fields[0]);
@@ -106,32 +111,35 @@ static int load_accounts(auth_store *store)
         return -1;
     FILE *file = fdopen(copy, "r");
     if (file == NULL) {
+        int error = errno;
         close(copy);
+        errno = error;
         return -1;
     }
     char *line = NULL;
     size_t capacity = 0;
-    int result = 0;
+    int error = 0;
     ssize_t length;
     while ((length = getline(&line, &capacity, file)) >= 0) {
         if (line[length - 1] != '\n' || memchr(line, '\0', (size_t)length) != NULL) {
-            result = -1;
+            error = EINVAL;
             break;
         }
         line[length - 1] = '\0';
         if (load_record(store, line) != 0) {
-            result = -1;
+            error = errno;
             break;
         }
     }
-    if (!feof(file) || ferror(file))
-        result = -1;
+    if (error == 0 && (!feof(file) || ferror(file)))
+        error = errno == 0 ? EIO : errno;
     free(line);
-    if (fclose(file) != 0)
-        result = -1;
-    if (result != 0)
-        errno = EINVAL;
-    return result;
+    if (fclose(file) != 0 && error == 0)
+        error = errno;
+    if (error == 0)
+        return 0;
+    errno = error;
+    return -1;
 }
 
 int auth_init(auth_store *store, const char *path)

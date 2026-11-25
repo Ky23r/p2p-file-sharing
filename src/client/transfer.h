@@ -5,7 +5,7 @@
 
 enum download_result {
     DOWNLOAD_OK, DOWNLOAD_LOCAL_ERROR, DOWNLOAD_CANCELLED, DOWNLOAD_CONNECT_FAILED,
-    DOWNLOAD_TIMEOUT, DOWNLOAD_TRANSFER_FAILED, DOWNLOAD_NOT_FOUND, DOWNLOAD_SIZE_MISMATCH
+    DOWNLOAD_TIMEOUT, DOWNLOAD_TRANSFER_FAILED, DOWNLOAD_NOT_FOUND
 };
 
 /* Borrow a validated search result and existing trusted destination directory;
@@ -15,7 +15,7 @@ enum download_result {
  * Never overwrite a destination; remove only this call's temporary file. An
  * already published complete file is retained if a signal arrives afterward.
  */
-enum download_result download_file(const FileSearchResult *result, const char *directory,
+enum download_result download_file(const FileSearchResult *result, const char *name, const char *directory,
                                    ClientSignals *signals);
 
 #endif

@@ -1,4 +1,5 @@
 #include "config.h"
+#include "protocol.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -52,13 +53,9 @@ static int read_id(const char *path, uint32_t *id)
             --length;
     }
     text[length] = '\0';
-    if (length == 0 || length > ID_DIGITS || strspn(text, "0123456789") != length) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    uintmax_t number = strtoumax(text, NULL, 10);
-    if (number > UINT32_MAX) {
+    uint64_t number;
+    if (length > ID_DIGITS || memchr(text, '\0', length) != NULL ||
+        !protocol_parse_uint64(text, UINT32_MAX, &number)) {
         errno = EINVAL;
         return -1;
     }

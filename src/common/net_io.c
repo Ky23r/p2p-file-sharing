@@ -2,7 +2,10 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -30,6 +33,27 @@ ssize_t send_all(int fd, const void *buffer, size_t size)
         sent += (size_t)n;
     }
     return (ssize_t)sent;
+}
+
+int send_status(int fd, int status)
+{
+    char line[6];
+    if (status < 100 || status > 599) {
+        errno = EINVAL;
+        return -1;
+    }
+    snprintf(line, sizeof(line), "%d\r\n", status);
+    return send_all(fd, line, sizeof(line) - 1) < 0 ? -1 : 0;
+}
+
+int net_enable_keepalive(int fd)
+{
+    const int enabled = 1, idle_seconds = 60, interval_seconds = 10, probes = 3;
+    if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &enabled, sizeof(enabled)) < 0 ||
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle_seconds, sizeof(idle_seconds)) < 0 ||
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval_seconds, sizeof(interval_seconds)) < 0)
+        return -1;
+    return setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &probes, sizeof(probes));
 }
 
 void net_reader_init(net_reader *reader, int fd)

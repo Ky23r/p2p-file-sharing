@@ -24,6 +24,11 @@ enum net_line_result {
  * Failure can occur after a partial send; caller must close the connection.
  */
 ssize_t send_all(int fd, const void *buffer, size_t size);
+/* Send a three-digit status followed by CRLF. Returns 0 or -1/errno. */
+int send_status(int fd, int status);
+
+/* Enable TCP keepalive on a control socket. Returns 0 or -1/errno. */
+int net_enable_keepalive(int fd);
 
 void net_reader_init(net_reader *reader, int fd);
 
