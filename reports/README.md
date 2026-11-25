@@ -67,7 +67,7 @@ Mỗi dòng phản hồi dưới đây kết thúc bằng CRLF trên đường t
 
 | Dòng phản hồi | Ý nghĩa |
 | --- | --- |
-| `200` | Hoàn tất `LOGIN`, `HELLO`, `SHARE`, `UNSHARE` hoặc `LOGOUT` trên kênh điều khiển. |
+| `200` | Lệnh thực hiện thành công. |
 | `201` | `REGISTER` đã tạo tài khoản. Kết nối tiếp tục ở trạng thái chưa đăng nhập. |
 | `200 END` | Kết thúc phản hồi `SEARCH` thành công, kể cả khi có 0 dòng `FILE`. |
 | `200 CHUNKED` | Peer chấp nhận `GET` và bắt đầu gửi dữ liệu theo khung. Lượt tải hoàn tất khi bên nhận đọc đủ khung `<end>`. |
